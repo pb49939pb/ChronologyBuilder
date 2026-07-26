@@ -1,0 +1,170 @@
+[
+  {
+    "case": "01_clean_typed",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 11.71
+  },
+  {
+    "case": "01_clean_typed",
+    "config": "mps_200dpi_raw",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 7.81
+  },
+  {
+    "case": "01_clean_typed",
+    "config": "mps_300dpi_raw",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 3.22
+  },
+  {
+    "case": "01_clean_typed",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.014,
+    "accuracy_pct": 98.6,
+    "seconds": 2.27
+  },
+  {
+    "case": "02_handwriting_legible",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.083,
+    "accuracy_pct": 91.7,
+    "seconds": 9.27
+  },
+  {
+    "case": "02_handwriting_legible",
+    "config": "mps_200dpi_raw",
+    "wer": 0.083,
+    "accuracy_pct": 91.7,
+    "seconds": 2.78
+  },
+  {
+    "case": "02_handwriting_legible",
+    "config": "mps_300dpi_raw",
+    "wer": 0.111,
+    "accuracy_pct": 88.9,
+    "seconds": 3.39
+  },
+  {
+    "case": "02_handwriting_legible",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.083,
+    "accuracy_pct": 91.7,
+    "seconds": 2.48
+  },
+  {
+    "case": "03_handwriting_cursive",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.507,
+    "accuracy_pct": 49.3,
+    "seconds": 9.29
+  },
+  {
+    "case": "03_handwriting_cursive",
+    "config": "mps_200dpi_raw",
+    "wer": 0.507,
+    "accuracy_pct": 49.3,
+    "seconds": 2.52
+  },
+  {
+    "case": "03_handwriting_cursive",
+    "config": "mps_300dpi_raw",
+    "wer": 0.542,
+    "accuracy_pct": 45.8,
+    "seconds": 3.37
+  },
+  {
+    "case": "03_handwriting_cursive",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.521,
+    "accuracy_pct": 47.9,
+    "seconds": 2.48
+  },
+  {
+    "case": "04_faxed_noisy",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 9.6
+  },
+  {
+    "case": "04_faxed_noisy",
+    "config": "mps_200dpi_raw",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 2.48
+  },
+  {
+    "case": "04_faxed_noisy",
+    "config": "mps_300dpi_raw",
+    "wer": 0.014,
+    "accuracy_pct": 98.6,
+    "seconds": 3.73
+  },
+  {
+    "case": "04_faxed_noisy",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.007,
+    "accuracy_pct": 99.3,
+    "seconds": 2.94
+  },
+  {
+    "case": "05_skewed_scan",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.576,
+    "accuracy_pct": 42.4,
+    "seconds": 10.98
+  },
+  {
+    "case": "05_skewed_scan",
+    "config": "mps_200dpi_raw",
+    "wer": 0.576,
+    "accuracy_pct": 42.4,
+    "seconds": 2.89
+  },
+  {
+    "case": "05_skewed_scan",
+    "config": "mps_300dpi_raw",
+    "wer": 0.625,
+    "accuracy_pct": 37.5,
+    "seconds": 4.91
+  },
+  {
+    "case": "05_skewed_scan",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.021,
+    "accuracy_pct": 97.9,
+    "seconds": 2.36
+  },
+  {
+    "case": "06_worst_case_combined",
+    "config": "cpu_200dpi_raw",
+    "wer": 0.542,
+    "accuracy_pct": 45.8,
+    "seconds": 9.45
+  },
+  {
+    "case": "06_worst_case_combined",
+    "config": "mps_200dpi_raw",
+    "wer": 0.542,
+    "accuracy_pct": 45.8,
+    "seconds": 2.8
+  },
+  {
+    "case": "06_worst_case_combined",
+    "config": "mps_300dpi_raw",
+    "wer": 0.528,
+    "accuracy_pct": 47.2,
+    "seconds": 3.72
+  },
+  {
+    "case": "06_worst_case_combined",
+    "config": "mps_200dpi_deskew_contrast",
+    "wer": 0.069,
+    "accuracy_pct": 93.1,
+    "seconds": 3.53
+  }
+]

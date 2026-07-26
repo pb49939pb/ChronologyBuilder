@@ -1,0 +1,11 @@
+{% if license_display.valid %}
+<div class="license-badge" title="Licensed to {{ license_display.customer }}">
+  <span class="license-badge-tier">{{ license_display.tier_label }}</span>
+  {% if license_display.expires_display %}
+    <span class="license-badge-expiry">{{ license_display.days_remaining }} day{{ "" if license_display.days_remaining == 1 else "s" }} left &middot; expires {{ license_display.expires_display }}</span>
+    <div class="license-progress-track">
+      <div class="license-progress-fill" style="width: {{ license_display.percent_elapsed }}%;"></div>
+    </div>
+  {% endif %}
+</div>
+{% endif %}

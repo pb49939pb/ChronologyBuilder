@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronology Builder — Dashboard</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="title-row">
+        <h1>Chronology Builder</h1>
+        <span class="header-links">
+          <a href="/architecture" class="arch-link">View Architecture Diagram</a>
+          {% include "_license_badge.html" %}
+        </span>
+      </div>
+      <p class="subtitle">Cases you've built chronologies for, and a place to start the next one.</p>
+      <div class="notice">
+        <strong>Prototype only.</strong> Do not upload real case files or PHI until firm IT/compliance has
+        formally approved this project (see <code>PRODUCT_DEFINITION.md</code> &sect;7/&sect;9). Use
+        synthetic/test PDFs only.
+      </div>
+
+      <a href="/case" class="new-case-cta">
+        <span class="new-case-cta-icon">&#43;</span>
+        <span class="new-case-cta-text">
+          <span class="new-case-cta-title">Start a New Case</span>
+          <span class="new-case-cta-desc">Point at a case's folder &mdash; reads the Complaint/Notice of
+            Intent first, then builds a cited chronology from every record. Runs in the background;
+            safe to close and check back later.</span>
+        </span>
+      </a>
+      <a href="/review" class="quick-test-link">Quick single-file test &rarr;</a>
+    </header>
+
+    <div class="case-list-panel">
+      <h2>Cases <span id="case-count"></span></h2>
+      <div id="case-list"></div>
+    </div>
+  </div>
+
+  {% include "_version_badge.html" %}
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

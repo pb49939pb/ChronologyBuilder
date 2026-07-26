@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronology Builder — License</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="title-row">
+        <h1>License</h1>
+      </div>
+
+      {% if license_display.valid %}
+        <div class="notice">
+          <strong>Licensed to {{ license_display.customer }}.</strong>
+          Tier: {{ license_display.tier_label }}.
+          {% if license_display.expires_display %}
+            {{ license_display.days_remaining }} day{{ "" if license_display.days_remaining == 1 else "s" }}
+            left &middot; expires {{ license_display.expires_display }}.
+          {% else %}
+            No expiration (lifetime license).
+          {% endif %}
+        </div>
+        <p><a href="/">Continue to the dashboard &rarr;</a></p>
+      {% else %}
+        <div class="batch-error">
+          <strong>Not licensed.</strong> {{ status.reason }}
+        </div>
+      {% endif %}
+
+      {% if error %}
+        <div class="batch-error">{{ error }}</div>
+      {% endif %}
+      {% if success %}
+        <div class="notice">{{ success }}</div>
+      {% endif %}
+
+      <form method="POST" action="/license">
+        <label for="token">License key</label>
+        <textarea id="token" name="token" rows="4" placeholder="Paste your license key here" required></textarea>
+        <p class="field-hint">Runs entirely offline — this is checked locally against a signature, no
+          internet connection is used or required.</p>
+        <button type="submit">Install License</button>
+      </form>
+    </header>
+  </div>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronology Builder — Start a New Case</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="title-row">
+        <h1>Start a New Case</h1>
+        <span class="header-links">
+          <a href="/" class="arch-link">&larr; Back to Dashboard</a>
+          {% include "_license_badge.html" %}
+        </span>
+      </div>
+      <p class="subtitle">Point at a case's folder — it reads the Complaint/Notice of Intent first, then
+        builds a cited chronology from every medical record in the folder (subfolders included), one case
+        at a time, in the background. Safe to close this tab and check back later.</p>
+      <div class="notice">
+        <strong>Prototype only.</strong> Same rule as the main app — synthetic/test PDFs only until
+        firm IT/compliance approval (<code>PRODUCT_DEFINITION.md</code> &sect;7/&sect;9).
+      </div>
+
+      <form id="case-form">
+        <label for="plaintiff-name">Plaintiff's name (this names the case)</label>
+        <input type="text" id="plaintiff-name" name="plaintiff_name" placeholder="Jane Smith" required>
+
+        <label for="case-folder-input">Case folder</label>
+        <input type="file" id="case-folder-input" webkitdirectory directory multiple required>
+        <p id="case-folder-summary" class="field-hint" style="display:none;"></p>
+
+        <label for="priority-hint">Especially important subfolders or file types (optional)</label>
+        <input type="text" id="priority-hint" name="priority_hint"
+               placeholder="e.g. records/radiology, depositions — comma-separated">
+        <p class="field-hint">Common subfolders: correspondence, depositions, discovery, experts, liens,
+          memo, orders, pleadings, records, team. Everything in the folder is still read and analyzed —
+          this just tells the model what to focus extra attention on first.</p>
+
+        <div class="detail-slider-row">
+          <label for="detail-slider">Level of detail</label>
+          <input type="range" id="detail-slider" min="0" max="2" step="1" value="1">
+          <div class="detail-slider-labels">
+            <span>Brief</span>
+            <span>Standard</span>
+            <span>Detailed</span>
+          </div>
+        </div>
+
+        <button type="submit" id="start-btn">Start Case</button>
+      </form>
+      <div id="start-error" class="batch-error" style="display:none;"></div>
+    </header>
+
+    <div id="job-view" class="batch-job-view" style="display:none;">
+      <h2>Case status</h2>
+      <div id="job-summary" class="job-summary"></div>
+      <div id="groups-list" class="groups-list"></div>
+    </div>
+  </div>
+
+  <!-- Hidden, triggered programmatically by "Check for new files" (see startRescan in case.js) --
+       re-selecting the same folder is how a rescan learns about newly added files, since nothing
+       is read directly off disk server-side anymore. -->
+  <input type="file" id="rescan-folder-input" webkitdirectory directory multiple style="display:none;">
+
+  {% include "_version_badge.html" %}
+
+  <script src="{{ url_for('static', filename='case.js') }}"></script>
+</body>
+</html>

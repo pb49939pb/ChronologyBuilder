@@ -1,0 +1,10 @@
+#!/bin/sh
+# Reminder only — never blocks a push (exits 0 unconditionally). The actual reliable "every push
+# gets a patch bump" mechanism is .github/workflows/bump-version.yml, which runs server-side AFTER
+# a push lands (a local pre-push hook can't correctly inject a new commit into a push already in
+# flight — git has already computed which commits it's sending by the time this hook runs).
+#
+# One-time setup needed for this hook to actually run at all (tracked hooks aren't picked up by
+# git automatically): `git config core.hooksPath hooks` once, from the repo root.
+echo "Reminder: the patch version bumps automatically once this push lands (see .github/workflows/bump-version.yml)."
+exit 0

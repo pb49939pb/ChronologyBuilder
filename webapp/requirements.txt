@@ -1,0 +1,8 @@
+flask
+requests
+pdfplumber
+easyocr
+numpy
+cryptography
+python-docx
+Pillow

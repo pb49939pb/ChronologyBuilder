@@ -1,0 +1,60 @@
+# Containerized deployment for LawFirmAgent — designed for the eventual dedicated production
+# workstation (PRODUCT_DEFINITION.md §4), NOT this dev machine. See DEPLOYMENT.md for the full
+# writeup of why, including a real, current (2026) limitation that rules this out for an Apple
+# Silicon Mac specifically: Docker Desktop on macOS cannot pass the Metal GPU through to a
+# container, so `ollama` would fall back to CPU-only inference (~3-5x slower, confirmed via
+# current sources — see DEPLOYMENT.md). This compose file is written for a Linux + NVIDIA GPU
+# workstation, where GPU passthrough is mature and this limitation doesn't apply.
+#
+# The `lawfirmagent_internal` network has `internal: true` — Docker enforces at the bridge/iptables
+# level that containers on it have NO route to the outside world at all, not merely a firewall rule
+# you have to remember to keep in place. This is the concrete structural improvement containerizing
+# gets you over the current native setup (which relies on OLLAMA_NO_CLOUD=1 + a host firewall rule).
+#
+# Neither service publishes a port to anything but the host's own loopback interface — nothing here
+# is reachable from the rest of the office network, let alone the internet.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    # Requires the NVIDIA Container Toolkit installed on the host. Omit this whole `deploy` block
+    # (falls back to CPU) only for initial smoke-testing — real use needs the GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_NO_CLOUD=1
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - lawfirmagent_internal
+    restart: unless-stopped
+    # No `ports:` entry — only the webapp container can reach this, via the internal network's
+    # service-name DNS (http://ollama:11434), and that network has no path off the host at all.
+
+  webapp:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    environment:
+      - LAWFIRMAGENT_OLLAMA_URL=http://ollama:11434/api/generate
+      - LAWFIRMAGENT_MODEL=${LAWFIRMAGENT_MODEL:-llama3.1:8b}
+    ports:
+      - "127.0.0.1:5050:5050" # loopback-only on the HOST — not reachable from the LAN
+    networks:
+      - lawfirmagent_internal
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+networks:
+  lawfirmagent_internal:
+    driver: bridge
+    internal: true # the whole point: no default route to the internet, enforced by Docker itself
+
+volumes:
+  ollama_models:

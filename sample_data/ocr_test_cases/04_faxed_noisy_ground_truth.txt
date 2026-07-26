@@ -1,0 +1,23 @@
+SYNTHETIC TEST DATA - NOT A REAL PATIENT
+
+Crestline Family Medicine - Office Visit
+Date of Service: 03/15/2026
+Provider: Dr. M. Okafor-Ellis
+
+Chief complaint: Follow-up for hypertension.
+
+HPI: 58-year-old male returns for routine blood pressure follow-up. Reports
+occasional headaches in the mornings over the past two weeks. Denies chest
+pain, vision changes, or shortness of breath. Currently taking lisinopril
+20mg once daily.
+
+Exam: Blood pressure 162/98, repeated at 158/96. Heart rate 76 and regular.
+No peripheral edema. Fundoscopic exam deferred.
+
+Assessment: Hypertension, poorly controlled on current regimen despite
+medication compliance per patient report.
+
+Plan: Increase lisinopril to 40mg once daily. Recheck blood pressure in
+2 weeks. Basic metabolic panel ordered to assess renal function given
+dose increase. Counseled on low-sodium diet and home blood pressure
+monitoring twice daily with a log to bring to next visit.

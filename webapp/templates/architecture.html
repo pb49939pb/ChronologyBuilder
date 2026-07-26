@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronology Builder — Architecture</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="title-row">
+        <h1>How Chronology Builder Works</h1>
+        <span class="header-links">
+          <a href="/" class="arch-link">&larr; Back to Dashboard</a>
+          {% include "_license_badge.html" %}
+        </span>
+      </div>
+      <p class="subtitle">Every step below runs on this machine. Nothing in this pipeline sends data anywhere else.</p>
+    </header>
+
+    <div class="diagram-card">
+      <pre class="mermaid" id="diagram">
+flowchart TB
+    subgraph mac["Your Mac — everything below runs only here"]
+        direction TB
+        browser["Browser UI&lt;br/&gt;upload PDFs, review findings,&lt;br/&gt;approve / reject, export"]
+        flask["Flask app — 127.0.0.1:5050&lt;br/&gt;session files in a temp folder"]
+        extract{"Per page: does pdfplumber&lt;br/&gt;find a real text layer?&lt;br/&gt;(≥20 characters)"}
+        ocr["OCR fallback — easyocr&lt;br/&gt;rasterizes the page &amp; reads it&lt;br/&gt;only runs on pages that fail the check"]
+        ollama["Ollama server — 127.0.0.1:11434&lt;br/&gt;local LLM (llama3.1:8b)&lt;br/&gt;OLLAMA_NO_CLOUD=1"]
+        disk[("Local disk&lt;br/&gt;session PDFs and exported files")]
+
+        browser -- "1. upload .zip" --> flask
+        flask -- "2. extract each page" --> extract
+        extract -- "yes: normal, typed page" --> ollama
+        extract -- "no: likely scanned/faxed" --> ocr
+        ocr -- "OCR'd text" --> ollama
+        ollama -- "3. structured JSON findings" --> flask
+        flask -- "4. findings + stats" --> browser
+        browser -- "5. fetch source PDF to highlight" --> flask
+        flask --- disk
+        browser -. "review state kept in sessionStorage" .-> browser
+    end
+
+    internet(("Internet"))
+    mac -- "no connection — verified empirically, see TESTING_PLAN.md" --x internet
+
+    classDef offline fill:#f2b8b5,stroke:#8a2e2e,color:#4a1414;
+    class internet offline;
+    classDef fallback fill:#e8d9b8,stroke:#7d2a3a,color:#4a1414;
+    class ocr fallback;
+      </pre>
+    </div>
+
+    <div class="notice">
+      This diagram reflects the actual code paths in <code>webapp/app.py</code> and
+      <code>webapp/static/app.js</code>. "No connection to the internet" isn't just a claim here — it
+      was verified empirically by monitoring live network connections during a real request (see
+      <code>TESTING_PLAN.md</code> &sect;2), and Ollama's own cloud/remote-inference feature is
+      explicitly disabled (<code>OLLAMA_NO_CLOUD=1</code>, see <code>PRODUCT_DEFINITION.md</code>
+      &sect;7).
+    </div>
+
+    <div class="notice">
+      <strong>OCR only runs when a page actually needs it.</strong> Most PDFs from an EHR export
+      already have a real, embedded text layer, so pulling the text out is fast and exact — OCR is
+      unnecessary overhead there and would only introduce more error. The app detects which pages
+      are which automatically: it extracts text from every page first, and only if that page yields
+      under ~20 characters (a reliable signal for "this page has no real text layer," i.e. it's a
+      scanned image or a fax) does it fall back to OCR for that specific page. Everything else is
+      read directly, no OCR involved. Pages that did need OCR are called out explicitly in the
+      results as a warning, since OCR text is less reliable than a native text layer — and the
+      document viewer can't auto-highlight passages on those pages (there's no text layer in the
+      original PDF itself for it to search), so it says so rather than guessing.
+    </div>
+  </div>
+
+  {% include "_version_badge.html" %}
+
+  <script type="module" src="{{ url_for('static', filename='architecture.js') }}"></script>
+</body>
+</html>

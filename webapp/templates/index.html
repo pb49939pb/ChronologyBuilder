@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronology Builder</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="title-row">
+        <h1>Chronology Builder</h1>
+        <span class="header-links">
+          <a href="/" class="arch-link">&larr; Back to Dashboard</a>
+          <a href="/case" class="arch-link">Start a New Case</a>
+          <a href="/architecture" class="arch-link">View Architecture Diagram</a>
+          {% include "_license_badge.html" %}
+        </span>
+      </div>
+      <p class="subtitle">Local prototype &middot; model: <code>{{ model }}</code> &middot; runs entirely on this machine, nothing leaves it</p>
+      <div class="notice">
+        <strong>Prototype only.</strong> Do not upload real case files or PHI until firm IT/compliance has
+        formally approved this project (see <code>PRODUCT_DEFINITION.md</code> &sect;7/&sect;9). Use
+        synthetic/test PDFs only. Uploaded PDFs are kept on this machine's disk until your next upload
+        replaces them, so the document viewer below can show you the source — see
+        <code>webapp/README.md</code>.
+      </div>
+
+      <form id="upload-form">
+        <label for="zipfile">Upload a .zip of PDFs</label>
+        <input type="file" id="zipfile" name="zipfile" accept=".zip" required>
+
+        <div class="detail-slider-row">
+          <label for="detail-slider">Level of detail</label>
+          <input type="range" id="detail-slider" min="0" max="2" step="1" value="1">
+          <div class="detail-slider-labels">
+            <span>Brief</span>
+            <span>Standard</span>
+            <span>Detailed</span>
+          </div>
+        </div>
+
+        <button type="submit" id="submit-btn">Build Chronology</button>
+      </form>
+
+      <div id="status" class="status" style="display:none;">
+        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+        <div id="status-text" class="status-text"></div>
+        <div id="file-log" class="file-log"></div>
+      </div>
+    </header>
+
+    <div id="results" class="results" style="display:none;">
+      <div class="results-top">
+        <div id="batch-progress-banner" class="batch-progress-banner" style="display:none;"></div>
+        <div id="stats" class="stats"></div>
+        <div class="review-bar">
+          <span id="review-progress" class="review-progress"></span>
+          <div class="review-bar-actions">
+            <button type="button" id="preview-chronology-btn" class="secondary-btn">Preview Chronology</button>
+            <button id="export-btn" type="button">Export Approved Chronology</button>
+          </div>
+        </div>
+        <div id="case-rescan-row" class="rescan-row" style="display:none;">
+          <button type="button" id="review-rescan-btn">Check for new files</button>
+          <span id="review-rescan-message" class="group-meta"></span>
+        </div>
+        <!-- Hidden, triggered programmatically by "Check for new files" -- re-selecting the same
+             folder is how a rescan learns about newly added files, since nothing is read directly
+             off disk server-side anymore (see case.js's identical pattern on the /case page). -->
+        <input type="file" id="review-rescan-folder-input" webkitdirectory directory multiple style="display:none;">
+        <div id="warnings" class="warnings"></div>
+      </div>
+
+      <div id="facts-panel" class="facts-panel" style="display:none;">
+        <div class="facts-tabs" id="facts-tabs" role="tablist"></div>
+        <div class="facts-list" id="facts-list"></div>
+        <div class="facts-hint">Click a fact to add it to the reviewed output if it isn't there already.</div>
+      </div>
+
+      <div class="split-view">
+        <div class="findings-pane">
+          <div id="findings-list"></div>
+        </div>
+        <div class="viewer-pane">
+          <div class="viewer-toolbar">
+            <span id="viewer-title">No document loaded</span>
+            <span id="viewer-page-info"></span>
+          </div>
+          <div id="viewer-bates-check" class="viewer-bates-check" style="display:none;"></div>
+          <div class="viewer-canvas-wrap" id="viewer-canvas-wrap">
+            <div class="pdf-page-wrapper" id="pdf-page-wrapper">
+              <canvas id="pdf-canvas"></canvas>
+              <div id="text-layer" class="text-layer-measure"></div>
+              <div id="highlight-layer" class="highlight-layer"></div>
+            </div>
+          </div>
+          <div class="decision-bar">
+            <button id="reject-btn" type="button" class="decision-btn reject" disabled>&cross; Reject</button>
+            <button id="approve-btn" type="button" class="decision-btn approve" disabled>&check; Approve</button>
+          </div>
+          <div id="viewer-hint" class="viewer-hint">Click a finding on the left to jump to its source.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="export-confirm-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-box">
+      <h3>Export with unreviewed findings?</h3>
+      <p id="export-confirm-message"></p>
+      <div class="modal-actions">
+        <button type="button" id="export-confirm-cancel" class="secondary-btn">Cancel</button>
+        <button type="button" id="export-confirm-proceed">Export Anyway</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="chronology-preview-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-box-wide">
+      <div class="modal-header-row">
+        <h3>Chronology Preview</h3>
+        <button type="button" id="chronology-preview-close" class="secondary-btn">Close</button>
+      </div>
+      <div id="chronology-preview" class="chronology-preview"></div>
+    </div>
+  </div>
+
+  {% include "_version_badge.html" %}
+
+  <script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

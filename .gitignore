@@ -30,3 +30,6 @@ electron/dist/
 
 # Preliminary patent/FTO research — not for the public repo until the user decides otherwise.
 PATENT_RESEARCH.md
+
+# Competitive pricing research/strategy — same reasoning, keep local for now.
+PRICING_RESEARCH.md

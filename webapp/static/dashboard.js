@@ -9,6 +9,23 @@ function statusBadge(status) {
   return `<span class="batch-status batch-status-${status}">${label}</span>`;
 }
 
+// A second, independent badge — human review/export progress, distinct from the pipeline-status
+// badge above. Only meaningful once processing is actually done (see callers), and "exported" wins
+// over any in-progress review state since it's the most advanced thing that can be true.
+function reviewStatusBadge(progress, exportedAt) {
+  if (!progress || progress.total === 0) return "";
+  if (exportedAt) {
+    return `<span class="review-status review-status-exported" title="Exported ${formatDate(exportedAt)}">Exported</span>`;
+  }
+  if (progress.decided === 0) {
+    return '<span class="review-status review-status-needs-review">Needs Review</span>';
+  }
+  if (progress.decided < progress.total) {
+    return '<span class="review-status review-status-in-review">In Review</span>';
+  }
+  return '<span class="review-status review-status-reviewed">Reviewed</span>';
+}
+
 function escapeHtml(s) {
   const div = document.createElement("div");
   div.textContent = s == null ? "" : String(s);
@@ -86,6 +103,7 @@ async function loadCases() {
       <div class="case-row-top">
         <span class="case-row-name">${escapeHtml(job.plaintiff_name || job.folder_display_name)}</span>
         ${statusBadge(job.status)}
+        ${job.status === "done" ? reviewStatusBadge(job.primary_group_review_progress, job.primary_group_exported_at) : ""}
       </div>
       <div class="case-row-meta">${metaLine(job)}</div>
       <div class="case-row-action">${caseAction(job)}</div>

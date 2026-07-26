@@ -11,7 +11,7 @@
 // and marked accordingly — verify on real Windows hardware before relying on them. mode="remote"
 // (the real target topology) doesn't spawn anything, so it isn't affected by that uncertainty at
 // all — it just opens a window at a URL, which is platform-independent.
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -433,6 +433,42 @@ async function start() {
   applog.logEvent("app_started", "Application window opened");
 }
 
+// Blocks every outbound request the renderer (or anything else routed through Electron's default
+// session) tries to make, except the app's own backend and GitHub's update-check/release-asset
+// hosts. Two real network paths exist OUTSIDE this hook's reach and can't be governed by it: (1)
+// Ollama's own subprocess, which makes its own HTTP calls to ollama.com during first-run model
+// pull — a separate Go binary, entirely outside Chromium's network stack; (2) possibly
+// electron-updater's checkForUpdates(), depending on whether its HTTP client issues requests
+// through Electron's session or Node's own https module directly — unverified either way, so the
+// GitHub hosts are listed defensively: harmless if the hook can't see that traffic, load-bearing
+// if it can. See TEST_RESULTS.md for the empirical check of which is actually true.
+function installNetworkAllowlist() {
+  const backendUrl = config.MODE === "remote" ? config.REMOTE_URL : config.LOCAL_URL;
+  const allowedHosts = new Set([
+    new URL(backendUrl).host,
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+  ]);
+
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] },
+    (details, callback) => {
+      const host = new URL(details.url).host;
+      const allowed = allowedHosts.has(host);
+      if (!allowed) {
+        applog.logEvent(
+          "network_request_blocked",
+          `Blocked request to ${host}`,
+          { level: "WARNING", context: { url: details.url } }
+        );
+      }
+      callback({ cancel: !allowed });
+    }
+  );
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -449,6 +485,7 @@ if (!gotLock) {
     // build.mac.icon in package.json (baked into the bundle itself, no runtime call needed).
     if (process.platform === "darwin" && app.dock) app.dock.setIcon(ICON_PATH);
     applog.cleanupOldLogs();
+    installNetworkAllowlist();
     start();
   });
 

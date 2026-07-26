@@ -110,6 +110,28 @@ def _inject_license_display():
     return {"license_display": licensing.get_license_display_info()}
 
 
+# --- Security headers --------------------------------------------------------------------------
+# This app has no remote content or third-party scripts of any kind (confirmed: no external URLs
+# anywhere in templates/static/*.js/*.css) — every script/style/font/image it ever loads is its own
+# bundled static file. That makes a strict CSP nearly free here, unlike a typical web app that has
+# to carve out exceptions for a CDN or analytics script. script-src has no 'unsafe-inline'/
+# 'unsafe-eval' — confirmed neither pdf.js nor mermaid (the only two non-trivial bundled JS
+# libraries) use eval()/new Function() anywhere, and the one inline script this app used to have
+# (the update-badge handler) was moved to static/version-badge.js specifically so this could hold.
+# style-src keeps 'unsafe-inline' — several templates use inline style="" attributes for simple
+# show/hide toggling, and rewriting all of those into classes buys little given style injection
+# can't achieve code execution the way script injection can.
+@app.after_request
+def _set_security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self'; "
+        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 # --- Activity/error logging (see applog.py) --------------------------------------------------
 # Deliberately logs only method/path/status/duration — never request bodies/query strings, which
 # is where user-entered content (plaintiff names, priority hints, etc.) could end up. Every route
@@ -1272,6 +1294,15 @@ _STREAMING_ARRAY_FIELDS = (
 )
 
 
+def _count_ai_findings(findings: dict) -> int:
+    """Total AI-generated findings across every streaming category — the "total" half of a group's
+    derived review-progress count (see _compute_review_status). Deliberately excludes reviewer-added
+    Key Facts; callers add db.load_added_facts()'s count on top, since app.js's own review-progress
+    bar (orderedFindingIds) counts both and a server-side total that omitted added facts would
+    disagree with what the reviewer actually sees on the review page."""
+    return sum(len(findings.get(k) or []) for k in _STREAMING_ARRAY_FIELDS)
+
+
 def _extract_complete_arrays(partial_json_text: str) -> dict:
     """Best-effort look at an in-progress (not yet valid) JSON object being streamed token-by-token,
     and pulls out whichever top-level array fields are ALREADY fully closed. Deliberately never
@@ -2335,12 +2366,35 @@ def case_start():
     return jsonify({"job_id": job_id})
 
 
+def _compute_review_status(job_id: str, group_key: str, group: dict, decided_map: dict) -> dict:
+    """Derives {"total", "decided"} for one group — never stored, always computed fresh from
+    review_actions/added_facts so it can't drift out of sync with them. `decided_map` is a single
+    job-wide db.count_decided() result, passed in so callers iterating every group in a job don't
+    re-run that query per group. Clamped because delete_added_fact doesn't cascade-delete a matching
+    review_actions row today, so a fact deleted after being approved could otherwise push decided
+    above total."""
+    total = _count_ai_findings(group.get("findings") or {}) + len(db.load_added_facts(job_id, group_key))
+    decided = min(decided_map.get(group_key, 0), total)
+    return {"total": total, "decided": decided}
+
+
 @app.route("/case/status/<job_id>")
 def case_status(job_id):
     manifest = _get_batch_manifest(job_id)
     if manifest is None:
         return jsonify({"error": "Unknown job id"}), 404
-    return jsonify(manifest)
+    result = dict(manifest)
+    exported_map = db.get_exported_map(job_id)
+    decided_map = db.count_decided(job_id)
+    result["groups"] = {
+        key: {
+            **g,
+            "review_progress": _compute_review_status(job_id, key, g, decided_map),
+            "exported_at": exported_map.get(key),
+        }
+        for key, g in manifest.get("groups", {}).items()
+    }
+    return jsonify(result)
 
 
 @app.route("/case/<job_id>/rescan", methods=["POST"])
@@ -2390,8 +2444,18 @@ def case_jobs_list():
         primary_key = _normalize_patient_key(manifest.get("plaintiff_name"), dob=None, fallback_id="")
         primary_group = groups.get(primary_key, {})
         failed_group_count = sum(1 for g in groups.values() if g.get("status") == "failed")
+        # Only the primary group's review/export status is surfaced here — it's the only group a
+        # dashboard row links to (see caseAction() in dashboard.js); secondary groups are visible via
+        # the case status page, which pulls the full per-group breakdown from /case/status/<job_id>.
+        job_id = manifest["job_id"]
+        primary_review_progress = None
+        primary_exported_at = None
+        if primary_group:
+            decided_map = db.count_decided(job_id)
+            primary_review_progress = _compute_review_status(job_id, primary_key, primary_group, decided_map)
+            primary_exported_at = db.get_exported_map(job_id).get(primary_key)
         jobs.append({
-            "job_id": manifest["job_id"],
+            "job_id": job_id,
             "folder_display_name": manifest.get("folder_display_name"),
             "plaintiff_name": manifest.get("plaintiff_name"),
             "defendant_names": manifest.get("defendant_names") or [],
@@ -2404,6 +2468,8 @@ def case_jobs_list():
             "failed_group_count": failed_group_count,
             "primary_group_key": primary_key,
             "primary_group_ready": bool(primary_group.get("findings")),
+            "primary_group_review_progress": primary_review_progress,
+            "primary_group_exported_at": primary_exported_at,
         })
     return jsonify(jobs)
 
@@ -2484,6 +2550,8 @@ def case_group_results(job_id, group_key):
         # first load, then sessionStorage stays the synchronous source of truth as before.
         "review_state": db.load_review_state(job_id, group_key),
         "added_facts": db.load_added_facts(job_id, group_key),
+        "review_progress": _compute_review_status(job_id, group_key, group, db.count_decided(job_id)),
+        "exported_at": db.get_exported_map(job_id).get(group_key),
         "rescan_status": manifest.get("rescan_status"),
         "rescan_message": manifest.get("rescan_message"),
     })
@@ -2561,6 +2629,19 @@ def case_delete_added_fact(job_id, group_key, fact_id):
     if err:
         return err
     db.delete_added_fact(job_id, group_key, fact_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/case/<job_id>/<group_key>/export", methods=["POST"])
+def case_mark_exported(job_id, group_key):
+    """Records that this group's chronology was exported, for the "Exported" review-status badge
+    (see _compute_review_status/dashboard.js/case.js). Deliberately separate from /export/docx
+    itself, which stays the stateless "dumb renderer" its own docstring describes — this is called
+    by app.js as a fire-and-forget follow-up once a docx download actually succeeds."""
+    err = _require_case_group(job_id, group_key)
+    if err:
+        return err
+    db.mark_exported(job_id, group_key)
     return jsonify({"ok": True})
 
 

@@ -31,6 +31,18 @@ PORT = 5098
 APP_URL = f"http://127.0.0.1:{PORT}"
 
 
+def _install_test_license(data_dir: Path) -> None:
+    """A throwaway data dir has no license.token yet, and every non-exempt route 402s without one
+    (see app.py's _enforce_license) — issue a real one so this test can actually drive Case Mode."""
+    token = subprocess.check_output(
+        [str(WEBAPP_DIR / ".venv" / "bin" / "python"), str(BASE / "scripts" / "license_tool.py"),
+         "issue", "--tier", "lifetime", "--customer", "durable-storage-test"],
+        text=True,
+    ).strip().splitlines()[-1]
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "license.token").write_text(token)
+
+
 def start_server(data_dir: Path) -> subprocess.Popen:
     proc = subprocess.Popen(
         [str(WEBAPP_DIR / ".venv" / "bin" / "python"), "app.py"],
@@ -44,6 +56,7 @@ def start_server(data_dir: Path) -> subprocess.Popen:
     while time.time() < deadline:
         try:
             urllib.request.urlopen(APP_URL, timeout=2)
+            _install_test_license(data_dir)
             return proc
         except Exception:
             time.sleep(0.5)

@@ -32,7 +32,7 @@
       "repo": "ChronologyBuilder"
     },
     "mac": {
-      "target": "dmg",
+      "target": ["dmg", "zip"],
       "icon": "icon.icns",
       "extraResources": [
         {

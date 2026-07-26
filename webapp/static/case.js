@@ -75,6 +75,22 @@ function statusBadge(status) {
   return `<span class="batch-status batch-status-${status}">${label}</span>`;
 }
 
+// A second, independent badge — human review/export progress, distinct from the pipeline-status
+// badge above. Only meaningful once a group's processing is actually done (see caller).
+function reviewStatusBadge(progress, exportedAt) {
+  if (!progress || progress.total === 0) return "";
+  if (exportedAt) {
+    return `<span class="review-status review-status-exported" title="Exported ${new Date(exportedAt * 1000).toLocaleString()}">Exported</span>`;
+  }
+  if (progress.decided === 0) {
+    return '<span class="review-status review-status-needs-review">Needs Review</span>';
+  }
+  if (progress.decided < progress.total) {
+    return '<span class="review-status review-status-in-review">In Review</span>';
+  }
+  return '<span class="review-status review-status-reviewed">Reviewed</span>';
+}
+
 function renderJob(manifest) {
   jobView.style.display = "block";
   const groups = manifest.groups || {};
@@ -135,6 +151,7 @@ function renderJob(manifest) {
       <span class="group-name">${escapeHtml(g.display_name)}</span>
       <span class="group-meta">${g.file_count} file${g.file_count === 1 ? "" : "s"}</span>
       ${statusBadge(g.status)}
+      ${g.status === "done" ? reviewStatusBadge(g.review_progress, g.exported_at) : ""}
       ${g.progress_text ? `<span class="group-meta">${escapeHtml(g.progress_text)}</span>` : ""}
       <span class="group-extra">${extra}</span>
     `;

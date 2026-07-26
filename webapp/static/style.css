@@ -904,6 +904,23 @@ button:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 .batch-status-done { background: var(--approve); color: white; }
 .batch-status-failed, .batch-status-error { background: var(--reject); color: white; }
 
+/* Human review/export progress — a second, independent badge from the pipeline-status one above
+   (same visual language, distinct color per state so "Exported" never reads as just another shade
+   of "Done"). */
+.review-status {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.review-status-needs-review { background: var(--finding-hover-bg); color: var(--muted); }
+.review-status-in-review { background: var(--warn-bg); color: var(--warn-text, var(--text)); }
+.review-status-reviewed { background: var(--approve); color: white; }
+.review-status-exported { background: var(--accent); color: white; }
+
 /* --- Dashboard (the app's home page, "/") --- */
 .new-case-cta {
   display: flex;

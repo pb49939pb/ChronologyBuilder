@@ -2199,3 +2199,177 @@ would have hidden the exact same problem (both were built from the same stale fr
 changes, not just once ever — `npm run dist` alone is not sufficient to pick up backend code
 changes, only Electron-side (`main.js`/`package.json`) ones. Worth automating this dependency (e.g.
 having `npm run dist` shell out to the freeze script first) rather than relying on remembering.
+
+## Security audit (2026-07-21)
+
+Full pass across injection, auth/authz, XSS, Electron hardening, Flask hardening, secrets handling,
+and dependency vulnerabilities, per the HIPAA-adjacent threat model this project has had in mind
+since PRODUCT_DEFINITION.md §7/§9 (no real PHI yet, but treated as if there will be). Read every
+route in `webapp/app.py`, all of `webapp/db.py`/`license.py`/`applog.py`, `electron/main.js`/
+`preload.js`/`config.js`, and every `webapp/static/*.js` file end to end rather than sampling.
+
+### The one real architectural finding: remote mode has zero per-request authentication
+
+This is the most important thing in this audit, and it's not a hypothetical. Confirmed directly
+from `webapp/license.py`: the license system is entirely "is *some* valid license token present in
+this host's app-data directory," checked in `_enforce_license()` (`webapp/app.py:93-102`). It has no
+concept of a user, session, cookie, API key, or client identity of any kind — `get_current_license()`
+takes no request context at all. In `remote` mode (`electron/config.js`, `TOWER_SETUP.md`), the
+Flask server runs on a separate "tower" machine and is reached over `http://192.168.50.1:5050` by
+whatever's on the other end of that link. Once the license file exists on the tower (which it must,
+for the app to be usable at all), **every route — `/case/jobs` listing every case's plaintiff name
+and defendant names, every case's full chronology findings including patient demographics, `/export/
+docx`, everything — is reachable by anything that can reach that IP and port, with no login, no
+token, no per-request check of any kind.** The only thing standing between "on that network segment"
+and "full read/write access to every case's PHI" is the physical topology described in
+`TOWER_SETUP.md` (a direct Ethernet cable, no switch, no gateway). That's a real and reasonable
+mitigation for the *documented* topology, but the application has no defense in depth if that
+topology is ever violated — a switch added later "just to also plug in a printer," a Wi-Fi adapter
+re-enabled on the tower, a second laptop plugged into a hub instead of a direct cable, or simply the
+tower's Windows Firewall not being configured as recommended, and there is nothing else in the
+software stack that would stop a second device on that segment from pulling every case's records.
+
+**Not fixed — this is a real feature, not a bug fix.** Three options, roughly in order of effort:
+
+1. **Shared-secret header/cookie**: the Electron client sends a fixed pre-shared token (generated at
+   pairing time, stored in `app.getPath("userData")` on the laptop, checked in `_enforce_license` or
+   a new `before_request` hook) on every request. Cheapest to build, meaningfully raises the bar
+   (a device on the segment now needs the secret, not just network reachability), but it's still a
+   single shared secret, not real per-user identity, and doesn't help if the secret itself leaks.
+2. **mTLS or a client certificate** on the private link: stronger, matches "dedicated point-to-point
+   link" well, but is real new surface (cert generation/rotation/distribution) for a two-machine,
+   one-user deployment that may not be proportionate.
+3. **Bind + firewall as the actual control, documented as such**: accept that this is fundamentally a
+   trusted-network design (like most home NAS/self-hosted-app software), and instead of adding
+   in-app auth, make the network-level mitigation the documented, verified control — i.e. `TOWER_SETUP.md`
+   should say explicitly "this app has no application-layer authentication; the ONLY thing preventing
+   LAN-wide PHI access is the point-to-point topology and the tower's Windows Firewall scoped to that
+   one adapter," and that firewall scoping should be confirmed as an actual setup step, not just a
+   "defense in depth" aside.
+
+**Recommendation**: do (1) now — it's a small, contained change (one shared secret + one header
+check) that closes the "someone else plugs into the same segment" gap cheaply, and pair it with (3)
+regardless, since the current docs undersell how load-bearing the physical topology actually is.
+Skip (2) unless a future revision needs genuine multi-user/multi-device access to the tower.
+
+### Fixed
+
+- **Missing CSP / `X-Content-Type-Options` headers** (`webapp/app.py`, new `_set_security_headers`
+  after_request hook near the top of the file, alongside the other before/after hooks). This app
+  loads zero remote content of any kind — confirmed no external URLs anywhere in any template, `.js`,
+  or `.css` file — which makes a strict CSP unusually cheap here. Added `default-src 'self';
+  script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+  connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self';
+  frame-ancestors 'none'` plus `X-Content-Type-Options: nosniff`. `script-src` deliberately has no
+  `'unsafe-inline'`/`'unsafe-eval'` — confirmed neither pdf.js nor mermaid (the only two non-trivial
+  bundled JS libraries) call `eval()`/`new Function()` anywhere in their bundles (`grep`'d both). The
+  one inline `<script>` this app had (the update-badge click handler in `_version_badge.html`) was
+  moved to `webapp/static/version-badge.js` specifically so `script-src 'self'` could hold with no
+  exceptions. `style-src` keeps `'unsafe-inline'` since several templates use inline `style=""` for
+  simple show/hide toggling and rewriting all of those into classes wasn't worth it given style
+  injection can't achieve code execution the way script injection can. **Verified, not assumed**:
+  started the dedicated test-server instance (`testing/start_test_server.sh`, port 5051), confirmed
+  the headers are actually present via `curl -D -`, then drove `/`, `/architecture` (mermaid), `/review`
+  (pdf.js), and `/case` with Playwright (`testing/.venv`) — zero console errors on any page (a CSP
+  violation shows up as a console error, so this would have caught a real regression), and separately
+  confirmed the mermaid diagram on `/architecture` actually rendered a real `<svg>` (not just "no
+  errors").
+- **Electron network allowlist gap** (`electron/main.js:455-456`, `installNetworkAllowlist`). This
+  session's newly-added allowlist (see the previous entry's context) filtered `onBeforeRequest` on
+  `["http://*/*", "https://*/*"]` only — `ws://`/`wss://` requests weren't intercepted at all, so a
+  hypothetical future XSS in the renderer (none found — see below) could still open a raw WebSocket
+  to an arbitrary host with no allowlist check. Added `"ws://*/*"`/`"wss://*/*"` to the filter list.
+  The app doesn't use WebSockets today (Flask streams via chunked NDJSON, not `ws://`), so this is
+  pure defense-in-depth, but it was a real gap in a hook whose entire job is being an allowlist.
+  Confirmed Electron's `webRequest.onBeforeRequest` URL filter does support `ws(s)://` patterns.
+  `node --check electron/main.js` passes.
+
+### Confirmed already sound (audited, no change needed)
+
+- **SQL injection**: every query in `webapp/db.py` uses `?`-parameterized queries via `sqlite3` —
+  confirmed for every single statement in the file, no string-built SQL anywhere.
+- **Zip-slip / path traversal**: `safe_extract_pdfs()` (`app.py`) only ever joins `Path(name).name`
+  (stripping any directory component) under the resolved extract dir, with an explicit
+  parents-containment check before writing. `_safe_relative_path()` (`app.py`, used for
+  `webkitRelativePath`-carrying case-folder uploads) strips `".."`/`"."`/absolute-root segments and
+  runs each segment through `secure_filename()` before ever joining a path — a malicious
+  `webkitRelativePath` like `../../../etc/passwd` cannot escape `CASE_SOURCES_DIR`. `serve_pdf()`
+  resolves the requested session dir and confirms containment before serving, and only ever uses
+  `Path(filename).name` for the requested file. No path in this app is ever built from unsanitized
+  client input.
+- **Command/subprocess injection**: no `shell=True` anywhere in the repo. The only `subprocess.run()`
+  calls are in `scripts/build_backend.py`/`scripts/make_app_icon.py` (dev-only build tooling, fixed
+  argument lists, no user input). Electron's `spawn()` calls (`main.js`, Ollama + backend) use fixed
+  binaries/args resolved from `app.isPackaged`/`process.platform`, never from any request or renderer
+  input.
+- **XSS / output encoding**: every `.innerHTML =`/template-literal DOM write across `app.js`/`case.js`/
+  `dashboard.js` that includes server- or LLM-derived text goes through one of each file's own
+  `escapeHtml()` (3 near-identical copies, one per file — matches this codebase's "small, local
+  helper over a shared abstraction" convention) or uses `.textContent`. Checked this exhaustively,
+  not just the first few hits: all 28 `escapeHtml(` call sites plus every `.innerHTML =` assignment in
+  all three files were read in place. LLM-generated findings text, filenames, plaintiff/defendant
+  names, and citation quotes are all escaped before insertion. `onFactChipClick`'s `querySelector`
+  uses `CSS.escape()` on a hash-derived id, not raw text. No gaps found.
+- **IDOR**: `job_id` is `uuid.uuid4().hex` (122 bits, unguessable). `group_key` is a normalized,
+  guessable hash of the patient's name — but every case route requires *both* `job_id` and
+  `group_key` together, and there's no route that accepts a bare `group_key`. Given the finding
+  above (no auth at all on the LAN in remote mode), `group_key` predictability is moot in practice —
+  the real exposure is the lack of any auth boundary, not id guessability on top of it.
+- **License-enforcement coverage**: `_LICENSE_EXEMPT_ENDPOINTS`/`_LICENSE_REDIRECT_ENDPOINTS`
+  (`app.py:85-90`) were checked against every `render_template()` route in the file (`license_page`,
+  `dashboard`, `index`, `architecture`, `case_page`) — all four non-exempt GET pages are correctly
+  listed in the redirect set; nothing is missing an endpoint-name entry that would silently bypass
+  the license gate.
+- **Electron hardening**: every `BrowserWindow` (`main.js`) sets `contextIsolation: true`,
+  `nodeIntegration: false`; sandboxing is Electron's own default (true, since neither window
+  overrides it) and wasn't disabled anywhere; `webSecurity` isn't touched (stays enabled/default);
+  `preload.js` exposes exactly two functions (`checkForUpdates`/`onUpdateStatus`), nothing that hands
+  the renderer any Node/Electron capability. No remote/untrusted content is ever loaded — `loadURL`
+  is only ever called with the app's own backend URL or (via `setWindowOpenHandler`) a same-origin
+  navigation target.
+- **Flask hardening**: `debug=False` always (`app.py`'s `__main__` block) — no Werkzeug debugger RCE
+  surface. No `SECRET_KEY` in use anywhere (no sessions/flash messages), so there's nothing to
+  generate insecurely. `MAX_CONTENT_LENGTH` is capped at 200MB.
+- **Secrets/data handling**: `scripts/license_tool.py`'s `generate-keypair` explicitly refuses to
+  write the private signing key inside the repo tree (checks `REPO_ROOT in key_path.resolve()`) and
+  chmods it 0600; only the public key (not sensitive) is written into the repo. `.gitignore` covers
+  `license_signing_key*`, `license.token`, `license_clock_state.json`, and the usual `.venv`/
+  `node_modules`/build-output paths. Spot-checked every `applog.log_event`/`exc_info=` call site added
+  this session against `applog.py`'s own documented redaction policy — filenames, extracted text,
+  prompts, and model output are never passed as `context`/message content anywhere; only counts,
+  types, and opaque ids are logged.
+- **DOCX export (`/export/docx`)**: takes an arbitrary client JSON body but is a pure in-memory
+  renderer — every value goes through `python-docx`'s own `add_run()` (XML-escaped internally via
+  `lxml`, no raw XML injection possible), the output filename is server-generated
+  (`time.strftime(...)`, never client input), and there's no filesystem read/write driven by any
+  client-supplied path. Can't be abused to read or write arbitrary files.
+
+### Dependency vulnerabilities (flagged, not fixed)
+
+Ran `pip-audit` against `webapp/.venv` (installed fresh into the venv for this — no system-wide
+install) and `npm audit` against `electron/`.
+
+- **npm** (`electron/package.json`, production deps only — `electron-updater`): 0 vulnerabilities.
+  Full audit including `devDependencies` (`electron`, `electron-builder`) failed because npm's legacy
+  quick-audit endpoint is being retired server-side (`400 Bad Request` from `registry.npmjs.org`) —
+  an npm/registry-side issue, not something fixable here; worth re-running once npm's bulk-advisory
+  endpoint is what this npm version calls by default.
+- **pip** (`webapp/requirements.txt`, no versions pinned): `pip-audit` found real advisories against
+  the *currently installed* versions in `pillow` (11.3.0 — a long list, mostly image-parsing CVEs),
+  `torch` (2.8.0, an `easyocr` transitive dependency), `requests`/`urllib3`, `click`, `filelock`, and
+  `pdfminer-six`. **Deliberately not upgraded in this pass**: `requirements.txt` has no version pins
+  at all, so a fresh `pip install -r requirements.txt` today would already pull newer, patched
+  versions on its own — the exposure is specifically the *already-installed* dev venv, not a bad pin
+  committed to the repo. Pillow/torch in particular are exactly the two libraries this project's own
+  OCR-accuracy benchmarks (`testing/ocr_benchmark.py`, referenced throughout this log) are pinned
+  against by installed version, not by requirements.txt — bumping them in place risks silently
+  changing OCR behavior that was carefully measured, which needs its own re-benchmark pass, not a
+  drive-by version bump inside a security audit. Recommend: re-run the OCR benchmark suite after any
+  future `pip install --upgrade`, and consider actually pinning `requirements.txt` going forward so
+  "what's installed" and "what's committed" can't silently drift apart in either direction.
+
+### Not otherwise flagged
+
+Everything else audited — SQL injection, zip-slip, XSS, Electron `webPreferences`, Flask `debug`/
+`SECRET_KEY`, secrets-in-git, license-gate coverage — came back clean on direct inspection; see the
+"confirmed already sound" list above for specifics rather than a generic "looked fine."

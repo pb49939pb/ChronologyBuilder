@@ -1,41 +1,4 @@
 <div class="version-badge" id="version-badge" title="Chronology Builder v{{ app_version }}">
   <span id="version-badge-text">v{{ app_version }}</span>
 </div>
-<script>
-(function () {
-  // window.chronologyBuilder only exists when this page is running inside the real Electron app
-  // (see electron/preload.js) — undefined when viewed in a plain browser (dev/testing), in which
-  // case the badge is just a static version display, which is the correct degraded behavior.
-  if (!window.chronologyBuilder) return;
-
-  var badge = document.getElementById("version-badge");
-  var text = document.getElementById("version-badge-text");
-  var baseText = text.textContent;
-
-  window.chronologyBuilder.onUpdateStatus(function (status) {
-    if (status.status === "available") {
-      text.textContent = "Update available → v" + status.version;
-      badge.classList.add("has-update");
-      badge.title = "Click to download this update";
-    } else if (status.status === "downloading") {
-      text.textContent = "Downloading update… " + status.percent + "%";
-      badge.classList.add("has-update");
-    } else if (status.status === "downloaded") {
-      text.textContent = "Update ready — click to restart";
-      badge.classList.add("has-update");
-      badge.title = "Restart now to install v" + status.version;
-    } else if (status.status === "checking") {
-      badge.title = "Checking for updates…";
-    } else if (status.status === "not-available") {
-      badge.title = "Chronology Builder " + baseText + " (up to date)";
-    } else if (status.status === "error") {
-      badge.title = status.message || "Update check failed";
-    }
-  });
-
-  badge.style.cursor = "pointer";
-  badge.addEventListener("click", function () {
-    window.chronologyBuilder.checkForUpdates();
-  });
-})();
-</script>
+<script src="{{ url_for('static', filename='version-badge.js') }}"></script>

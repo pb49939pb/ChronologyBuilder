@@ -113,6 +113,13 @@ def init_db() -> None:
                     created_at REAL NOT NULL,
                     PRIMARY KEY (job_id, group_key, fact_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS case_exports (
+                    job_id TEXT NOT NULL REFERENCES cases(job_id) ON DELETE CASCADE,
+                    group_key TEXT NOT NULL,
+                    exported_at REAL NOT NULL,
+                    PRIMARY KEY (job_id, group_key)
+                );
                 """
             )
             conn.commit()
@@ -312,6 +319,63 @@ def load_added_facts(job_id: str, group_key: str) -> list[dict]:
     finally:
         conn.close()
     return [json.loads(r["payload_json"]) for r in rows]
+
+
+# --- Review/export status (Case Mode only) -----------------------------------------------------
+# "Reviewed" is deliberately NOT tracked here — it's derived at request time in app.py from
+# count_decided() vs. each group's total finding count, so it can never drift out of sync with the
+# review_actions/added_facts rows it's summarizing. "Exported" has no such derivable signal (an
+# export is a one-off user action, not a running tally), so it gets its own small event table.
+
+def mark_exported(job_id: str, group_key: str) -> None:
+    with _write_lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO case_exports (job_id, group_key, exported_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(job_id, group_key) DO UPDATE SET exported_at=excluded.exported_at
+                """,
+                (job_id, group_key, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_exported_map(job_id: str) -> dict[str, float]:
+    """{group_key: exported_at} for every exported group in this job — one query for the whole
+    job rather than one per group, since callers (case_status/case_jobs_list) need this for every
+    group in a manifest at once."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT group_key, exported_at FROM case_exports WHERE job_id=?",
+            (job_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["group_key"]: r["exported_at"] for r in rows}
+
+
+def count_decided(job_id: str) -> dict[str, int]:
+    """{group_key: number of findings with a non-null review status} for every group in this job —
+    the "decided" half of the derived reviewed/in-review/needs-review state, computed with one
+    grouped query rather than once per group."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT group_key, COUNT(*) AS n FROM review_actions
+            WHERE job_id=? AND kind='finding' AND status IS NOT NULL
+            GROUP BY group_key
+            """,
+            (job_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["group_key"]: r["n"] for r in rows}
 
 
 def delete_case(job_id: str) -> None:

@@ -1332,6 +1332,7 @@ exportBtn.addEventListener("click", async () => {
     if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
     const blob = await resp.blob();
     downloadBlob(blob, `chronology-export-${timestamp()}.docx`);
+    durablePost("/export", {}); // no-ops outside Case Mode; marks this group "Exported" (see dashboard/case status badges)
   } catch (err) {
     console.error("Word export failed:", err);
     alert("Sorry, the Word document export failed. Check the console for details and try again.");

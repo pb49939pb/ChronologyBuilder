@@ -2060,3 +2060,83 @@ line, but worth noting explicitly rather than silently implying it was exercised
 (PyInstaller backend, Ollama Windows binary + supporting files, NSIS installer) remains completely
 unverified — no Windows machine available in this environment; `DESKTOP_PACKAGING.md` now has exact
 steps to follow once one is.
+
+## Versioning, auto-update, structured logging, and an install wizard (2026-07-25/26)
+
+Four related requests, planned via Plan Mode (see the approved plan for full architecture reasoning
+and research on logging best practices). Built and verified together since they share touch points
+(`electron/package.json`, `main.js`'s startup sequence, the app-data logs directory).
+
+**Versioning**: root `VERSION` file (single source of truth, `0.0.1-pre` — valid semver stored
+internally per a clarifying question, since electron-builder/electron-updater both need real semver
+to function; the literal "pre-release-0.0.1" phrasing isn't valid semver). `scripts/bump_version.py
+{patch|minor|major}` updates `VERSION` and mirrors it into `electron/package.json`. `webapp/app.py`
+reads `VERSION` at startup via the existing `_resource_path()` helper (bundled as one more
+PyInstaller data file) and exposes it via a `@app.context_processor`, same pattern as the license
+badge. New `_version_badge.html` — bottom-right, fixed position, deliberately separate from the
+top-right license badge.
+
+**Auto-update**: `electron-updater` with the `github` provider (reads `package.json`'s
+`build.publish`, no separate hosting needed). Confirmed direction: silent best-effort check on
+launch (packaged mode only — dev mode skips entirely) that fails gracefully with no internet/no
+releases, plus a manual check via clicking the version badge itself (no app menu exists to hang a
+menu item off, so the badge doubles as the affordance) — reconciles "built-in auto-update" with the
+real deployment target often being air-gapped. Needed a proper `contextBridge`/`ipcMain` bridge
+(`electron/preload.js`, wired into `createWindow`'s `webPreferences`) since `contextIsolation: true`
+means the renderer can't call back into the main process otherwise — found and fixed that
+`preload.js` was referenced in `package.json`'s `files` list but never actually existed until now.
+Downloaded updates only install after an explicit "Restart Now" confirmation dialog.
+
+**Structured logging** (the piece explicitly asked to be researched, not assumed): converges on
+structured JSON-lines + redact-by-default + daily rotation + bounded retention — the standard shape
+for "ship me a log file and diagnose it" support workflows. `webapp/applog.py`/`electron/applog.js`
+both write into `get_app_data_dir()/logs/YYYY-MM-DD.log` (two components, not literally one shared
+file — avoids real cross-process write-locking for little benefit; "zip the logs folder" already
+satisfies the actual goal). **Found and fixed a real timezone bug during this work**: Python's
+handler originally rolled over at local-time midnight while the Electron side used UTC
+(`toISOString()`) — for any timezone behind UTC (all of the Americas), the two components would
+have written into DIFFERENT daily files for part of every day. Fixed by making the Python side use
+UTC too, confirmed by testing at a moment where local (07-25) and UTC (07-26) genuinely disagreed.
+Wired into `app.py`: `before_request`/`after_request` logging every request (method/path/status/
+duration — never query strings or bodies), a global `@app.errorhandler(Exception)` (today, an
+unhandled exception had zero durable record beyond an unwatched terminal), and `logger.exception`-
+equivalent calls added at the existing per-group/per-file `except Exception` blocks in
+`_run_case_job`/`_run_case_rescan`/document extraction, which previously discarded the actual
+traceback and kept only a short string. `electron/main.js`'s spawned children switched from
+`stdio: "ignore"` to piped stderr (captured into a small tail buffer, logged only on failure) — a
+real, related fix, since a spawn failure previously had literally no diagnostic trail at all.
+Verified directly: triggered a real exception, confirmed a same-day log file was created lazily,
+contains well-formed JSON per line (parsed every line to confirm), a full traceback string, and
+manually audited that no filename/PDF/patient content appears anywhere in any field.
+
+**Install wizard**: confirmed direction — "single GitHub file, one button" is just GitHub's own
+Release page, no custom page needed (added a real `README.md`, which didn't exist before, with a
+Getting Started section pointing at it). The actual improvement: NSIS switched from one-click to
+assisted/wizard mode (`oneClick: false`, one config flag). More substantively, replaced the splash
+screen's static "Downloading…" text (no progress indication for a 15-minute/4.7GB first-run
+download) with a real inline-DOM progress bar. Rewrote `ensureModelPulled` to use Ollama's own HTTP
+streaming API (`POST /api/pull`) instead of shelling out to `ollama pull` and regex-scraping its
+carriage-return-redrawn terminal output — the HTTP API returns real structured
+`{status, completed, total}` progress lines, turned into a genuine percentage. Verified: rebuilt the
+packaged app, confirmed it still launches correctly, shows the correct bumped version in its badge,
+and that `electron-updater`'s new dependency doesn't break the bundle (loaded far enough to reach
+and log its own graceful "no internet/no releases yet" failure).
+
+**The actual GitHub repo now exists and this automated versioning pipeline was verified for real,
+not just in a test harness**: user created `pb49939pb/ChronologyBuilder` on GitHub, but this project
+directory had no local git repo yet and the user had no SSH key/`gh` CLI configured on this machine
+— the reason their first push attempt silently didn't take (confirmed the remote was genuinely
+empty via `git ls-remote` before doing anything). Generated a new SSH key, user added it to their
+GitHub account, verified the connection, then did the real `git init` + first commit (483 files;
+explicitly reviewed the full `git add -A -n` dry-run output first for `.venv`/`node_modules`/private-
+key/large-file leakage before committing — none found, confirming `.gitignore` works as intended)
++ push. **The `.github/workflows/bump-version.yml` action fired for real on this actual first push**
+and correctly bumped `0.0.1-pre` → `0.0.2` (dropping the pre-release tag, per `bump_version.py`'s own
+logic), committed with its `[skip version bump]` loop-guard, and did not re-trigger itself — the
+exact end-to-end behavior the whole versioning design was for, now confirmed outside a test harness.
+Also installed a portable `gh` CLI (`.tools/gh/`, no Homebrew needed, same pattern as the portable
+Node install) for future GitHub work in this project.
+
+**Repo is currently public** — worth keeping in mind given this is still a prototype (no real case
+data belongs in it regardless, per the existing standing rule, but worth being extra mindful now
+that anyone can see the repo, not just people with direct access).

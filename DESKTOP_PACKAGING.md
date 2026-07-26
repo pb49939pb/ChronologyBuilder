@@ -66,14 +66,21 @@ below).
   she'll actually use, not a dev machine.
 
 **To do the Windows build once real hardware is available** (`electron/vendor/` is gitignored —
-build output, not committed source, see §"Bundled installer" below):
+build output, not committed source, see §"Bundled installer" below) — see
+`dev_prompts/windows_installer_buildout.md` for the full, detailed walkthrough (written for a
+fresh coding agent with no context on this machine); short version:
 1. `cd webapp && python -m venv .venv && .venv\Scripts\pip install -r requirements.txt pyinstaller`
 2. Run the app once so EasyOCR downloads its models to `%USERPROFILE%\.EasyOCR\model\` (or copy
    that folder over from a machine where it's already been used).
 3. `.venv\Scripts\python.exe ..\scripts\build_backend.py` → produces `electron/vendor/backend-win/`
    (mirrors the already-verified `backend-mac/` build — same script, platform-detected automatically).
-4. Download `ollama.exe` from https://ollama.com/download/windows, place it at
-   `electron/vendor/ollama-win/ollama.exe`.
+4. Install Ollama normally (https://ollama.com/download/windows), then copy its ENTIRE install
+   directory (not just `ollama.exe`) to `electron/vendor/ollama-win/` — **just the one binary is not
+   enough**, confirmed the hard way on macOS: Ollama needs a companion `llama-server` executable
+   plus several shared libraries sitting alongside the main binary, or every generate call fails
+   with "llama-server binary not found." Windows almost certainly has the same requirement in its
+   own form (a `llama-server.exe` + DLLs) — verify the actual installed directory's contents
+   directly rather than assuming, the same way this was root-caused on Mac.
 5. `npm run dist` (from `electron/`) — produces the NSIS installer via the `win.extraResources`
    config in `package.json`, which expects exactly the two directories built in steps 3-4.
 

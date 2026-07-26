@@ -269,6 +269,21 @@ function createWindow(url) {
     },
   });
   mainWindow.loadURL(url);
+
+  // The web app uses target="_blank" links in a few places (dashboard.js/case.js's "View
+  // chronology"/"Continue reviewing" links) — deliberately, so a plain browser keeps the
+  // dashboard/status page open in its own tab while the chronology opens in a new one. Electron's
+  // default handling of target="_blank" isn't "open a new tab" though — with no handler at all, it
+  // spawns an entirely new native BrowserWindow, which looks like a second copy of the whole app.
+  // Deny that and navigate this SAME window instead — one window total, just changing pages,
+  // matching what "stay in the same tab" actually means for a single-window desktop app. This is
+  // an Electron-shell-only fix; the target="_blank" markup itself stays untouched since it's still
+  // correct behavior for anyone using the plain web app in a real browser.
+  mainWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+    mainWindow.loadURL(targetUrl);
+    return { action: "deny" };
+  });
+
   if (app.isPackaged) checkForUpdates({ silent: true });
 }
 

@@ -2140,3 +2140,31 @@ Node install) for future GitHub work in this project.
 **Repo is currently public** — worth keeping in mind given this is still a prototype (no real case
 data belongs in it regardless, per the existing standing rule, but worth being extra mindful now
 that anyone can see the repo, not just people with direct access).
+
+## Real bug fixed: clicking into a chronology opened a whole new app window (2026-07-26)
+
+User report: clicking into a chronology from the dashboard/case status page inside the packaged
+Electron app opened what looked like a second copy of the whole app, instead of just navigating to
+the new page. Root cause: `dashboard.js`/`case.js`'s "Continue reviewing"/"View chronology" links
+use `target="_blank"` deliberately — in a plain browser this correctly opens the chronology in a
+new tab while leaving the dashboard/status page open in its own tab. Electron has no concept of
+browser tabs, though, and with no `setWindowOpenHandler` registered, its default handling of
+`target="_blank"` (internally the same as `window.open()`) is to spawn an entirely new native
+`BrowserWindow` — which is exactly what looked like "a new instance of the app."
+
+Fixed at the Electron shell level only, not in the web app: `electron/main.js`'s `createWindow()`
+now registers `mainWindow.webContents.setWindowOpenHandler(...)`, which denies the new-window
+request and instead calls `mainWindow.loadURL(...)` on the existing window — one window total,
+just navigating to the new page. Deliberately left the `target="_blank"` markup itself untouched,
+since removing it would make the plain-browser experience worse for no reason; the fix is purely
+about how Electron specifically interprets that same markup.
+
+**Verified via CDP** (real screenshots of this sandboxed dev environment don't show actual window
+content — same limitation noted earlier when this Electron shell was first built): quit the
+already-running packaged app, rebuilt with the fix (`npm run dist` → v0.0.4), reinstalled, relaunched
+with `--remote-debugging-port` so Playwright could connect via `connect_over_cdp` and directly count
+real OS-level windows/pages, not just DOM state. Before the fix this would have shown 2 pages after
+clicking; confirmed exactly 1 page total both before and after clicking a real "Continue reviewing"
+link, with that single page correctly navigated to the chronology's `/review?case=...&group=...`
+URL — the fix works and doesn't regress the plain-browser tab-opening behavior (untested here
+directly, but structurally guaranteed unchanged since the web app's own markup was never touched).

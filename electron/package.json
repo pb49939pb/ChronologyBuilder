@@ -1,6 +1,6 @@
 {
   "name": "lawfirmagent-desktop",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Desktop shell for Chronology Builder",
   "private": true,
   "main": "main.js",
@@ -32,7 +32,10 @@
       "repo": "ChronologyBuilder"
     },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "icon.icns",
       "extraResources": [
         {

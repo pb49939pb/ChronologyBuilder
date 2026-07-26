@@ -21,6 +21,9 @@ electron/node_modules/
 # build scripts rather than hand-edited. Distribute these as GitHub Release assets, not git commits.
 electron/vendor/
 electron/dist/
+# PyInstaller auto-generates this in webapp/ every time scripts/build_backend.py runs — a byproduct
+# of the CLI args already fully specified in that script, not meant to be hand-maintained/committed.
+webapp/*.spec
 
 # Local runtime artifacts.
 *.log

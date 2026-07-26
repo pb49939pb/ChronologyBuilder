@@ -2168,3 +2168,34 @@ clicking; confirmed exactly 1 page total both before and after clicking a real "
 link, with that single page correctly navigated to the chronology's `/review?case=...&group=...`
 URL — the fix works and doesn't regress the plain-browser tab-opening behavior (untested here
 directly, but structurally guaranteed unchanged since the web app's own markup was never touched).
+
+## Real bug found: the bundled backend was stale, missing everything from the versioning/logging work (2026-07-26)
+
+While verifying the window-fix release by actually downloading it from GitHub (not just testing the
+local build) and cold-starting it: the version badge showed **v0.0.2** instead of the actual current
+version. Root cause: `electron/vendor/backend-mac/` (the PyInstaller-frozen backend) was built once,
+during the earlier bundled-installer work, and **never rebuilt since** — `npm run dist` only
+re-packages whatever's already sitting in that directory, it doesn't re-run
+`scripts/build_backend.py`. Every feature added in the subsequent versioning/auto-update/logging
+session (the `VERSION` file, the version badge template, `applog.py` entirely) was silently absent
+from every packaged build since, including the just-published v0.0.3 and the first cut of v0.0.6.
+Confirmed directly: `applog*`/`VERSION` were missing from the bundle's contents entirely before the
+fix, present after re-running `scripts/build_backend.py`.
+
+**Fixed**: re-ran `scripts/build_backend.py`, rebuilt the Electron package, and re-verified via a
+genuine cold start (killed the dev Flask process holding port 5050 first, confirmed the packaged
+app then spawned its own bundled backend, confirmed the dashboard now correctly shows v0.0.6).
+Re-uploaded the corrected assets to the already-published v0.0.6 GitHub release (deleted the stale
+assets, uploaded the rebuilt ones) rather than cutting yet another release.
+
+**Verified the actual downloaded artifact, not just the local build**: downloaded
+`Chronology-Builder-0.0.6-arm64.dmg` directly from its GitHub release URL via `curl`, confirmed the
+byte count and SHA-512 checksum both matched `latest-mac.yml` exactly (proving the upload itself
+wasn't corrupted), then mounted the DMG, installed to `/Applications`, and launched it — this is
+what actually caught the stale-backend bug, since testing only the local `electron/dist/` build
+would have hidden the exact same problem (both were built from the same stale frozen backend).
+
+**Lesson worth remembering**: `scripts/build_backend.py` must be re-run any time `webapp/` source
+changes, not just once ever — `npm run dist` alone is not sufficient to pick up backend code
+changes, only Electron-side (`main.js`/`package.json`) ones. Worth automating this dependency (e.g.
+having `npm run dist` shell out to the freeze script first) rather than relying on remembering.

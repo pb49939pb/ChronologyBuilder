@@ -6,6 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "predist": "node scripts/predist.js",
     "dist": "electron-builder"
   },
   "devDependencies": {

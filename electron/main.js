@@ -22,6 +22,13 @@ const config = require("./config.js");
 const applog = require("./applog.js");
 const { autoUpdater } = require("electron-updater");
 
+// Every release published so far is marked "Pre-release" on GitHub (accurate — this is still a
+// prototype) — but electron-updater's GitHubProvider only looks at GitHub's "latest production
+// release" by default, which doesn't exist here, so the update check would otherwise always fail
+// with "please ensure a production release exists" no matter how many pre-releases get published.
+// Found via a real failed check in this app's own logs, not assumed.
+autoUpdater.allowPrerelease = true;
+
 // Keeps the last few lines of a spawned child's stderr so a failure can be logged with actual
 // diagnostic content instead of just "it exited" — capped since this is only ever used for the
 // tail of a failure, not a general-purpose log capture (see applog.js for the real log).

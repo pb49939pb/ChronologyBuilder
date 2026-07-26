@@ -221,3 +221,65 @@ model to explicitly flag, in the `text` field of any timeline/diagnosis entry de
 also mentioned as pre-existing/chronic elsewhere in the record, that it predates the events in
 question — a low-cost prompt addition addressing a real, professionally-recognized category this
 tool wasn't previously asked to distinguish.
+
+## Part 4: Hardware Upgrade Options for Faster/Larger Local Models (2026-07-26)
+
+Baseline for all comparisons below: **the current dev machine** — Apple M3 MacBook, 16GB unified
+memory, running `llama3.1:8b` at 4-bit quantization via Ollama at roughly **15-18 tokens/second**
+(measured in this project's own earlier testing). 16GB unified memory (shared with macOS and
+everything else running) puts the practical ceiling at 7-8B parameter models — nothing bigger
+realistically fits with headroom to spare. Everything below is expressed relative to that.
+
+### Tier 1 — Budget dedicated GPU tower: ~$800-1,000
+
+A prebuilt tower with an **RTX 4060 Ti 16GB** (e.g. via [Newegg](https://www.newegg.com/p/pl?d=4060+prebuilt)
+or [Amazon](https://www.amazon.com/rtx-4060-ti-16gb-prebuilt-pc/s?k=rtx+4060+ti+16gb+prebuilt+pc)).
+Same 16GB ceiling as this Mac, so **not a bigger model** — but a dedicated graphics card's memory is
+much faster than a laptop's shared memory, so the *same* 8B model should run noticeably faster,
+roughly **3-4x current speed**. This is the "same capability, meaningfully snappier" option.
+
+### Tier 2 — Mid-range dedicated GPU tower: ~$1,200-2,000
+
+An **RTX 4070 Ti Super** or **RTX 4080** (16GB) prebuilt (e.g. via
+[Newegg](https://www.newegg.com/p/pl?d=4070+ti+super+prebuilt) or
+[Best Buy](https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat287600050002&id=pcat17071&qp=graphicscardsv_facet%3DVideo+Card%7ENVIDIA+GeForce+RTX+4070+SUPER)).
+Still a 16GB ceiling (same model-size limit as now), but noticeably faster than Tier 1 too — call it
+roughly **5-6x current speed**. Worth it mainly if speed matters more than trying a bigger model.
+
+### Tier 3 — High-end single GPU tower: ~$1,800-3,000
+
+An **RTX 4090 (24GB)** or newer **RTX 5090 (32GB)** prebuilt (e.g. the
+[Alienware Aurora R16 with RTX 4090](https://www.tomshardware.com/desktops/gaming-pcs/best-rtx-4090-desktop-deal-fully-loaded-alienware-pc-is-usd1-000-off),
+or search [Best Buy's RTX 4090 towers](https://www.bestbuy.com/site/searchpage.jsp?browsedCategory=pcmcat287600050002&id=pcat17071&qp=graphicscardsv_facet%3DVideo+Card%7ENVIDIA+GeForce+RTX+4090)).
+This is the first tier that's a **real step up in both directions**: roughly **6-8x current speed**
+on the same 8B model, *and* enough memory headroom (24-32GB) to run genuinely bigger, more capable
+models (30B+ parameter class) that this Mac simply cannot run at all today — not just faster
+answers, but noticeably better-quality ones on harder cases.
+
+### Alternative — Apple Mac Studio: $2,499 (M4 Max, 64GB) or $5,299 (M3 Ultra, 96GB)
+
+Direct from [Apple](https://www.apple.com/shop/buy-mac/mac-studio). Different tradeoff than the GPU
+towers above: **not necessarily faster** token generation on the current 8B model than a high-end
+NVIDIA card, but dramatically **more memory capacity** — enough to run truly large 70B-parameter
+models (10-15 tokens/second on the M3 Ultra, per current published benchmarks), which no single
+consumer GPU tower above can fit in memory at all regardless of price. The right pick if "run the
+most capable model that exists" matters more than raw speed on the model already in use. Also the
+quietest, simplest, least effort to set up of any option here (no case, no Windows, no separate GPU
+drivers) — relevant given `TOWER_SETUP.md`'s existing recommendation was already leaning this
+direction for the always-on "tower" role.
+
+### Summary table
+
+| Option | Price | vs. this Mac's speed (8B model) | Bigger models possible? |
+|---|---|---|---|
+| This M3 MacBook (today) | — | baseline | No (8B is the ceiling) |
+| RTX 4060 Ti 16GB tower | ~$800-1,000 | ~3-4x faster | No (same 16GB ceiling) |
+| RTX 4070 Ti Super/4080 tower | ~$1,200-2,000 | ~5-6x faster | No (same 16GB ceiling) |
+| RTX 4090/5090 tower | ~$1,800-3,000 | ~6-8x faster | **Yes** — 30B+ class models |
+| Mac Studio M4 Max 64GB | $2,499 | roughly comparable, not faster | **Yes** — larger models fit |
+| Mac Studio M3 Ultra 96GB | $5,299 | roughly comparable, not faster | **Yes** — genuine 70B-class models |
+
+Prices are prebuilt-tower street prices as of mid-2026 and fluctuate — treat as directional, verify
+current pricing before buying. This directly extends the tower hardware research already in
+`TOWER_SETUP.md` (which independently arrived at an RTX 4060 Ti 16GB tower as its own "sweet spot"
+recommendation) — the tiers above give the fuller range of what more budget actually buys.

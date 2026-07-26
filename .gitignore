@@ -27,3 +27,6 @@ electron/dist/
 
 # macOS Finder metadata.
 .DS_Store
+
+# Preliminary patent/FTO research — not for the public repo until the user decides otherwise.
+PATENT_RESEARCH.md

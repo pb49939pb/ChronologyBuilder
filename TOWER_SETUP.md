@@ -89,6 +89,18 @@ model, with real headroom to move up to a 13B-class model later without a hardwa
 - **Windows Firewall on the tower**: restrict the Flask/Ollama ports to only the private link's
   network adapter, not "all networks" — defense in depth even though there's no gateway to route
   through anyway.
+- **Client pairing (built 2026-07-21, see `webapp/pairing.py`)**: this activates automatically the
+  moment `LAWFIRMAGENT_BIND_HOST` is set to something other than `127.0.0.1`/`localhost` for tower
+  exposure — no separate flag to remember. The Electron client generates a random key on its own
+  first launch and attaches it to every request; the tower has no paired key on its own first boot,
+  so whichever key arrives first gets permanently trusted, and every later request must match it
+  exactly. This is a real guarantee specifically because of the point-to-point cable topology above
+  (nothing else can reach the tower before the laptop does) — it authenticates "a device holding
+  this key," not the laptop's hardware, so it isn't a substitute for the firewall scoping above.
+  **Re-pairing** (e.g. the laptop is replaced): delete `paired_client_key.token` from the tower's
+  app-data directory and restart both apps while the two machines are cabled together in isolation
+  again — the same discipline as the original setup, since whichever device reaches the tower next
+  after that file is deleted becomes the new trusted one.
 
 ## Net assessment
 

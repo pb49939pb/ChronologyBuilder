@@ -5,6 +5,7 @@ license_signing_key*
 *license_signing_key*
 license.token
 license_clock_state.json
+paired_client_key.token
 
 # Python virtualenvs (large, machine-specific, already excluded from the repos this was cloned
 # from in spirit — each has its own .venv built locally).

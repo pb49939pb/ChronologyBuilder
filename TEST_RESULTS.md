@@ -2373,3 +2373,69 @@ install) and `npm audit` against `electron/`.
 Everything else audited — SQL injection, zip-slip, XSS, Electron `webPreferences`, Flask `debug`/
 `SECRET_KEY`, secrets-in-git, license-gate coverage — came back clean on direct inspection; see the
 "confirmed already sound" list above for specifics rather than a generic "looked fine."
+
+**Update 2026-07-21, same day: the remote-mode auth gap above is now addressed** — see "Trust-on-
+first-use client pairing" below.
+
+## Trust-on-first-use client pairing for remote/tower mode (2026-07-21)
+
+Closes the one real finding from the security audit above: remote mode had zero per-request
+authentication. Discussed the design with the user first — specifically walked through why a naive
+"generate a key, attach it, done" isn't actually authentication unless the server has some concept
+of *which* key is the right one, which led to trust-on-first-use (TOFU) as the mechanism: the tower
+has no paired key on its first boot; whichever key arrives on its very first request gets
+permanently remembered; every later request must match exactly or gets rejected. Given the actual
+topology (`TOWER_SETUP.md`: a direct point-to-point Ethernet cable, nothing else ever plugged into
+that segment), the first device that can possibly reach the tower over that link genuinely is the
+laptop — so TOFU is a real, meaningful guarantee for this specific deployment, not just security
+theater. Honest limits, documented in `webapp/pairing.py`'s own docstring: this authenticates "a
+device holding this key," not the laptop's hardware specifically, and re-pairing (if the key file is
+ever deleted) trusts whatever connects next — same physical-isolation discipline as original setup.
+
+**Implementation:**
+- `webapp/pairing.py` (new): `PAIRING_KEY_FILE = db.get_app_data_dir() / "paired_client_key.token"`,
+  `check(header_value)` — the TOFU logic, under a lock (mirrors `db.py`'s `_write_lock` pattern) to
+  avoid a torn write if the first page load's several near-simultaneous asset requests all race to
+  pair at once (harmless in practice since they all carry the same client's key, but the lock
+  prevents a corrupted file regardless).
+- `webapp/app.py`: hoisted `_BIND_HOST` (`LAWFIRMAGENT_BIND_HOST` env var) to module level so it's
+  shared between the new hook and the existing `app.run(host=...)` call. New `_enforce_pairing_key`
+  before_request hook, registered before `_enforce_license` — a complete no-op whenever
+  `_BIND_HOST` is loopback (i.e. every dev/test run and local-mode use), so this activates
+  automatically and *only* under the exact condition that creates the exposure (the tower being
+  bound to a real LAN address), with no separate flag to remember and zero risk of forgetting to
+  turn it on. No endpoint exemptions needed (unlike licensing) — see below for why.
+- `electron/main.js`: `getOrCreatePairingKey()` (random 32-byte key via Node's built-in `crypto`,
+  stored in `app.getPath("userData")`, generated once on first launch) and
+  `installPairingKeyHeader()` — a `session.defaultSession.webRequest.onBeforeSendHeaders` hook
+  (same session/pattern as this session's earlier network allowlist) that injects
+  `X-Chronology-Pairing-Key` into every request to the backend host. This is why no endpoint
+  exemptions are needed server-side: the header gets attached at the network layer to literally
+  every request including the very first page navigation, so there's no separate "bootstrap" page
+  to keep reachable the way the license page needs to be.
+- `.gitignore` (`paired_client_key.token`, same defense-in-depth reasoning as `license.token`) and
+  `TOWER_SETUP.md` (documents the automatic activation + re-pairing procedure) updated.
+
+**Verified for real, not assumed** — simulated remote-mode exposure by binding a throwaway test
+server to this dev machine's actual LAN IP (`192.168.4.39`) rather than loopback:
+1. Plain `curl` with no header against the LAN-bound instance → `403`. The default loopback test
+   server (port 5051) was completely unaffected throughout (still `200`, no header needed) —
+   confirms activation is correctly scoped to bind host, zero impact on existing dev/test workflows.
+2. First `curl` with a made-up key → `200`, and `paired_client_key.token` appeared on disk holding
+   that exact value.
+3. A *different* key afterward → `403`. The original key again → `200`. Confirms real TOFU lock-in,
+   not just "first request always succeeds."
+4. Launched the actual packaged Electron shell (`LAWFIRMAGENT_MODE=remote`, pointed at that same
+   LAN-bound instance, a fresh `--user-data-dir` so it generated its own real key) against a
+   freshly re-paired (token file deleted) server — confirmed via CDP/Playwright
+   (`connect_over_cdp`) that the real dashboard loaded successfully with zero manual steps, proving
+   the header is genuinely injected transparently by the app itself, not just by a hand-crafted
+   curl request. Immediately after, a plain `curl` (no header) and a `curl` with a guessed key
+   against that now-paired instance both got `403` — proving a second, different client genuinely
+   cannot get in once the laptop has paired.
+5. `node --check electron/main.js`, `ast.parse` on `app.py`/`pairing.py` — clean. Re-ran
+   `testing/verify_durable_storage.py` (its own loopback-bound throwaway server, unaffected by any
+   of this) twice — first run hit the same known-flaky tiny-fixture LLM nondeterminism documented
+   earlier in this file (zero findings on a 1-page test PDF), second run passed clean end to end
+   (case processing, server restart, fresh-browser-context durability, highlighting) — consistent
+   with that being pre-existing fixture flakiness, not a regression from this change.

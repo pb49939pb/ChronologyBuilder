@@ -15,6 +15,8 @@ const { app, BrowserWindow, dialog, ipcMain, session } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
+const fs = require("fs");
+const crypto = require("crypto");
 
 const config = require("./config.js");
 const applog = require("./applog.js");
@@ -433,6 +435,10 @@ async function start() {
   applog.logEvent("app_started", "Application window opened");
 }
 
+function getBackendUrl() {
+  return config.MODE === "remote" ? config.REMOTE_URL : config.LOCAL_URL;
+}
+
 // Blocks every outbound request the renderer (or anything else routed through Electron's default
 // session) tries to make, except the app's own backend and GitHub's update-check/release-asset
 // hosts. Two real network paths exist OUTSIDE this hook's reach and can't be governed by it: (1)
@@ -443,9 +449,8 @@ async function start() {
 // GitHub hosts are listed defensively: harmless if the hook can't see that traffic, load-bearing
 // if it can. See TEST_RESULTS.md for the empirical check of which is actually true.
 function installNetworkAllowlist() {
-  const backendUrl = config.MODE === "remote" ? config.REMOTE_URL : config.LOCAL_URL;
   const allowedHosts = new Set([
-    new URL(backendUrl).host,
+    new URL(getBackendUrl()).host,
     "api.github.com",
     "github.com",
     "objects.githubusercontent.com",
@@ -469,6 +474,41 @@ function installNetworkAllowlist() {
   );
 }
 
+// Generates (once, on this machine's very first launch) or loads a random per-machine key, used
+// to let a remote-mode tower server recognize this specific client on every request (see
+// installPairingKeyHeader below and webapp/pairing.py for the server-side trust-on-first-use
+// logic). Harmless to generate even in local mode, where nothing ever checks it — keeps this
+// function unconditional rather than needing a mode branch.
+function getOrCreatePairingKey() {
+  const keyPath = path.join(app.getPath("userData"), "pairing_key.token");
+  if (fs.existsSync(keyPath)) {
+    return fs.readFileSync(keyPath, "utf-8").trim();
+  }
+  const key = crypto.randomBytes(32).toString("base64url");
+  fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+  fs.writeFileSync(keyPath, key);
+  return key;
+}
+
+// Attaches this machine's pairing key to every outgoing request to the backend, at the network
+// layer — covers the initial page navigation AND every fetch()/upload the loaded page's own JS
+// makes, all without any change to webapp/static/*.js, since Electron's webRequest intercepts
+// everything through this session regardless of which JS on the page issued it.
+function installPairingKeyHeader() {
+  const backendHost = new URL(getBackendUrl()).host;
+  const pairingKey = getOrCreatePairingKey();
+
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ["http://*/*", "https://*/*"] },
+    (details, callback) => {
+      if (new URL(details.url).host === backendHost) {
+        details.requestHeaders["X-Chronology-Pairing-Key"] = pairingKey;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -486,6 +526,7 @@ if (!gotLock) {
     if (process.platform === "darwin" && app.dock) app.dock.setIcon(ICON_PATH);
     applog.cleanupOldLogs();
     installNetworkAllowlist();
+    installPairingKeyHeader();
     start();
   });
 

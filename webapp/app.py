@@ -55,6 +55,7 @@ import license as licensing  # local module — offline license verification, se
                               # (named `licensing` here only to avoid shadowing the `license`
                               # stdlib-adjacent builtin some tools assume exists; the file itself
                               # is still webapp/license.py)
+import pairing  # local module — trust-on-first-use client pairing for remote/tower mode, see pairing.py
 
 def _resource_path(*relative_parts: str) -> Path:
     """Resolves a bundled resource's real path correctly in both dev mode (running from source —
@@ -80,6 +81,13 @@ app = Flask(
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB upload cap, sane default for a local tool
 app.config["TEMPLATES_AUTO_RELOAD"] = True  # Flask doesn't reload templates by default with debug=False
 
+# 127.0.0.1 is correct for native/bare-metal use (the default) — nothing off this machine can reach
+# the app. Set to a real LAN address for remote/tower mode (see TOWER_SETUP.md) — this same value
+# also gates _enforce_pairing_key below, since that's exactly the condition under which the app is
+# reachable by anything other than itself. Read once at module load rather than only inside
+# `__main__` so both that check and the eventual app.run() call agree on the same value.
+_BIND_HOST = os.environ.get("LAWFIRMAGENT_BIND_HOST", "127.0.0.1")
+
 # Routes reachable even without a valid license — the license page itself (so there's a way IN),
 # and static assets (so that page can actually render with CSS/JS rather than a blank page).
 _LICENSE_EXEMPT_ENDPOINTS = {"license_page", "static"}
@@ -88,6 +96,19 @@ _LICENSE_EXEMPT_ENDPOINTS = {"license_page", "static"}
 # error instead: redirecting those would hand back an HTML page where the frontend's `resp.json()`
 # expects JSON, turning a clear "not licensed" message into a confusing parse error.
 _LICENSE_REDIRECT_ENDPOINTS = {"dashboard", "index", "architecture", "case_page"}
+
+
+@app.before_request
+def _enforce_pairing_key():
+    # A no-op for every dev/test/local-mode run (all bind loopback) — only activates once this
+    # instance is actually reachable off this machine, which is exactly the condition that creates
+    # the exposure this exists to close. See pairing.py for what guarantee this does and doesn't
+    # provide. Checked before licensing: whether a request is even allowed to reach this box at all
+    # is logically prior to whether this box is licensed.
+    if _BIND_HOST in ("127.0.0.1", "localhost"):
+        return None
+    if not pairing.check(request.headers.get("X-Chronology-Pairing-Key")):
+        return jsonify({"error": "This device isn't paired with this server."}), 403
 
 
 @app.before_request
@@ -2863,11 +2884,9 @@ def analyze():
 
 
 if __name__ == "__main__":
-    # 127.0.0.1 is correct for native/bare-metal use (the current default) — it means literally
-    # nothing off this machine can reach the app. Inside a container this must be 0.0.0.0 instead:
-    # Docker's port-publishing forwards from the HOST's 127.0.0.1 to the container's own network
-    # namespace, and a container-internal bind to 127.0.0.1 isn't reachable via that forwarding.
-    # The container is still not exposed beyond the host, because the compose file publishes this
-    # port as `127.0.0.1:5050:5050` on the host side — see docker-compose.yml.
-    bind_host = os.environ.get("LAWFIRMAGENT_BIND_HOST", "127.0.0.1")
-    app.run(host=bind_host, port=PORT, debug=False, threaded=True)
+    # Inside a container this must be 0.0.0.0 instead: Docker's port-publishing forwards from the
+    # HOST's 127.0.0.1 to the container's own network namespace, and a container-internal bind to
+    # 127.0.0.1 isn't reachable via that forwarding. The container is still not exposed beyond the
+    # host, because the compose file publishes this port as `127.0.0.1:5050:5050` on the host side
+    # — see docker-compose.yml. (_BIND_HOST itself is set at module load — see its definition above.)
+    app.run(host=_BIND_HOST, port=PORT, debug=False, threaded=True)

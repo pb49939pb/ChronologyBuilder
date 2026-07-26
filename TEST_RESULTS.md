@@ -2439,3 +2439,21 @@ server to this dev machine's actual LAN IP (`192.168.4.39`) rather than loopback
    earlier in this file (zero findings on a 1-page test PDF), second run passed clean end to end
    (case processing, server restart, fresh-browser-context durability, highlighting) — consistent
    with that being pre-existing fixture flakiness, not a regression from this change.
+
+## Auto-update was silently never finding updates — found and fixed (2026-07-26)
+
+While verifying "does the app check for updates on launch" against the real installed `v0.0.9`
+build, its own log showed the check running automatically (confirming that part works exactly as
+designed) but failing every time with `Unable to find latest version on GitHub... please ensure a
+production release exists: HttpError: 406`. Root cause: `electron-updater`'s `GitHubProvider` only
+looks at GitHub's "latest production release" by default, and every release published from this
+repo so far (`v0.0.3`/`v0.0.6`/`v0.0.9`) is marked **Pre-release** (correct — this is still a
+prototype) — so there was never a "production release" for it to find, no matter how many
+pre-releases got published. Fixed with one line in `electron/main.js`:
+`autoUpdater.allowPrerelease = true`.
+
+**Verified for real**: built and published `v0.0.10` with the fix, quit the running `v0.0.9` app,
+downloaded the actual published `v0.0.10` `.dmg` from GitHub (checksum matched the local build
+byte-for-byte), installed it fresh, and launched it. Its log now shows
+`update_not_available: "Already on the latest version"` on that same automatic launch-time check —
+the real failure mode is gone, not just theoretically fixed. Version badge confirmed `v0.0.10`.

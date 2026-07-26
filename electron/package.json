@@ -1,6 +1,6 @@
 {
   "name": "lawfirmagent-desktop",
-  "version": "0.0.1-pre",
+  "version": "0.0.2",
   "description": "Desktop shell for Chronology Builder",
   "private": true,
   "main": "main.js",
@@ -18,7 +18,13 @@
   "build": {
     "appId": "com.lawfirmagent.desktop",
     "productName": "Chronology Builder",
-    "files": ["main.js", "preload.js", "config.js", "applog.js", "icon.png"],
+    "files": [
+      "main.js",
+      "preload.js",
+      "config.js",
+      "applog.js",
+      "icon.png"
+    ],
     "publish": {
       "provider": "github",
       "owner": "pb49939pb",
@@ -28,16 +34,28 @@
       "target": "dmg",
       "icon": "icon.icns",
       "extraResources": [
-        { "from": "vendor/ollama-mac", "to": "ollama-mac" },
-        { "from": "vendor/backend-mac", "to": "backend-mac" }
+        {
+          "from": "vendor/ollama-mac",
+          "to": "ollama-mac"
+        },
+        {
+          "from": "vendor/backend-mac",
+          "to": "backend-mac"
+        }
       ]
     },
     "win": {
       "target": "nsis",
       "icon": "icon.ico",
       "extraResources": [
-        { "from": "vendor/ollama-win", "to": "ollama-win" },
-        { "from": "vendor/backend-win", "to": "backend-win" }
+        {
+          "from": "vendor/ollama-win",
+          "to": "ollama-win"
+        },
+        {
+          "from": "vendor/backend-win",
+          "to": "backend-win"
+        }
       ]
     },
     "nsis": {

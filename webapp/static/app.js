@@ -88,6 +88,9 @@ let currentCaseMeta = null;
 // aren't always meaningful, and the label is guaranteed unique while a filename alone might not be
 // distinctive at a glance.
 let currentRecordSourceLabels = {};
+// filename -> page count, computed server-side (never model-derived — see page_counts in app.py's
+// _generate_chronology) — feeds the Abbreviations/Record Sources legend's "N page(s)".
+let currentPageCounts = {};
 
 // Review state — kept in the browser only (sessionStorage), not sent to the server.
 // findingsById: id -> { section, text, date, sourceFile, quote, sourceFiles, quotes }
@@ -106,6 +109,11 @@ const reviewKey = (sessionId) => `lawfirmagent_review_${sessionId}`;
 const editsKey = (sessionId) => `lawfirmagent_edits_${sessionId}`;
 const addedFactsKey = (sessionId) => `lawfirmagent_addedfacts_${sessionId}`;
 const summaryEditKey = (sessionId) => `lawfirmagent_summary_edit_${sessionId}`;
+// Preview-modal click-to-edit overrides — {field_key: value}. Case-level keys ("dol",
+// "facts_summary", "defendant_names", "demographics.dob", etc.) and per-row keys
+// ("row:<findingId>:date"/":page"/":source") share one flat map, matching the single
+// metadata_overrides DB table/endpoint (see db.py) that durably backs all of them alike.
+const previewOverridesKey = (sessionId) => `lawfirmagent_preview_overrides_${sessionId}`;
 
 function saveLastResult(data) {
   try {
@@ -162,6 +170,27 @@ function loadFindingEdits(sessionId) {
   } catch {
     return {};
   }
+}
+
+function loadPreviewOverrides(sessionId) {
+  try {
+    const raw = sessionStorage.getItem(previewOverridesKey(sessionId));
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePreviewOverride(fieldKey, value) {
+  if (!currentSessionId) return;
+  const overrides = loadPreviewOverrides(currentSessionId);
+  overrides[fieldKey] = value;
+  try {
+    sessionStorage.setItem(previewOverridesKey(currentSessionId), JSON.stringify(overrides));
+  } catch {
+    // non-fatal
+  }
+  durablePost("/metadata_edit", { field_key: fieldKey, value }); // no-ops outside Case Mode
 }
 
 // The AI-drafted summary at the bottom of the timeline gets the same click-to-edit treatment as
@@ -342,6 +371,9 @@ if (caseJobId && caseGroupKey) {
       if (summarySeed != null) sessionStorage.setItem(summaryEditKey(sessionId), summarySeed);
       if (data.added_facts && data.added_facts.length) {
         sessionStorage.setItem(addedFactsKey(sessionId), JSON.stringify(data.added_facts));
+      }
+      if (data.metadata_overrides && Object.keys(data.metadata_overrides).length) {
+        sessionStorage.setItem(previewOverridesKey(sessionId), JSON.stringify(data.metadata_overrides));
       }
     } catch {
       // non-fatal — just means this tab won't have the durable state pre-loaded
@@ -554,6 +586,7 @@ function renderResults(data, { fromCache = false } = {}) {
   currentOcrFiles = new Set(data.ocr_files || []);
   currentCaseMeta = data.case || null;
   currentRecordSourceLabels = data.record_source_labels || {};
+  currentPageCounts = data.page_counts || {};
 
   // A batch result being shown while still generating (see the polling loop below) legitimately
   // has no final stats yet — they're only computed once every chunk finishes — so this must not
@@ -1359,7 +1392,7 @@ function buildExportPayload() {
   orderedFindingIds.forEach((id) => {
     if (findingStatus[id] !== "approved") return;
     const meta = findingsById[id];
-    (bySection[meta.section] || (bySection[meta.section] = [])).push(meta);
+    (bySection[meta.section] || (bySection[meta.section] = [])).push({ ...meta, id });
   });
 
   const total = orderedFindingIds.length;
@@ -1389,24 +1422,31 @@ function buildExportPayload() {
   // (see _dedupe_with_multi_source in app.py) has sourceFiles/batesList instead of a single source —
   // show every one, joined, so the export doesn't silently hide that this fact was corroborated by
   // more than one record.
+  // Per-row overrides from the preview modal's click-to-edit (see savePreviewOverride) — applied on
+  // top of the AI-extracted/resolved value, same override-wins-if-present pattern as the case-level
+  // fields below. Keyed by finding id, not array position, so they survive reordering/re-sorting.
+  const overrides = loadPreviewOverrides(currentSessionId);
   const rows = [...bySection.timeline, ...bySection.key_facts]
     .map((f) => {
       const multiSource = f.sourceFiles && f.sourceFiles.length > 1;
+      const date = overrides[`row:${f.id}:date`] ?? (f.date || null);
+      const page = overrides[`row:${f.id}:page`] ??
+        (multiSource ? f.batesList.filter(Boolean).join(", ") || null : f.bates || null);
+      const source = overrides[`row:${f.id}:source`] ?? (multiSource
+        ? f.sourceFiles.map((sf) => recordSourceLabel(sf)).join(", ")
+        : recordSourceLabel(f.sourceFile) || null);
       return {
-        date: f.date || null,
-        page: multiSource ? f.batesList.filter(Boolean).join(", ") || null : f.bates || null,
+        id: f.id,
+        date, page, source,
         record_type: f.recordType || null,
         author: f.author || null,
-        source: multiSource
-          ? f.sourceFiles.map((sf) => recordSourceLabel(sf)).join(", ")
-          : recordSourceLabel(f.sourceFile) || null,
         text: f.text,
         at_issue: !!f.atIssue,
       };
     })
     .sort((a, b) => parseDateForSort(a.date) - parseDateForSort(b.date));
 
-  const asItems = (list) => list.map((f) => ({ text: f.text, citation: cite(f) }));
+  const asItems = (list) => list.map((f) => ({ id: f.id, text: f.text, citation: cite(f) }));
 
   const summaryEl = document.querySelector(".summary-box");
   const summary = summaryEl ? summaryEl.textContent : "";
@@ -1417,20 +1457,53 @@ function buildExportPayload() {
   // blank template itself.
   const caseMeta = currentCaseMeta || {};
 
-  // Abbreviations/Record Sources legend: label -> real filename, so the reviewer can look up what
-  // e.g. "FairviewOpReport" in the SOURCE column actually refers to.
-  const recordSources = Object.entries(currentRecordSourceLabels).map(([filename, label]) => ({
-    label, filename,
-  }));
+  // Only list a source in the legend if it's actually referenced by an approved row below — bySection
+  // is already approved-only (built above), so every source file mentioned there is exactly what
+  // made it into the final table.
+  const referencedFiles = new Set();
+  [...bySection.timeline, ...bySection.key_facts].forEach((f) => {
+    (f.sourceFiles && f.sourceFiles.length ? f.sourceFiles : [f.sourceFile]).forEach((sf) => sf && referencedFiles.add(sf));
+  });
+
+  // Abbreviations/Record Sources legend — facility/description/date come from the model's own raw
+  // record_sources entries (currentRawFindings), label/uniqueness from the server-resolved
+  // currentRecordSourceLabels, page count from currentPageCounts (never model-derived).
+  const rawRecordSourceByFile = {};
+  (currentRawFindings?.record_sources || []).forEach((entry) => {
+    if (entry.source_file) rawRecordSourceByFile[entry.source_file] = entry;
+  });
+  const recordSources = Object.entries(currentRecordSourceLabels)
+    .filter(([filename]) => referencedFiles.has(filename))
+    .map(([filename, label]) => {
+      const raw = rawRecordSourceByFile[filename] || {};
+      return {
+        label, filename,
+        facility: realValue(raw.facility) ? raw.facility : null,
+        description: realValue(raw.description) ? raw.description : null,
+        date: realValue(raw.date) ? raw.date : null,
+        page_count: currentPageCounts[filename] || null,
+      };
+    });
+
+  const demoBase = currentRawFindings?.patient_demographics || {};
+  const demoField = (key) => overrides[`demographics.${key}`] ?? demoBase[key];
+  const defendantNamesOverride = overrides["defendant_names"];
+  const defendantNames = defendantNamesOverride != null
+    ? defendantNamesOverride.split(",").map((s) => s.trim()).filter(Boolean)
+    : (caseMeta.defendant_names || []);
 
   return {
     generated_at: new Date().toLocaleString(),
     total, approved, rejected,
     plaintiff_name: caseMeta.plaintiff_name || null,
-    defendant_names: caseMeta.defendant_names || [],
-    dol: caseMeta.dol || null,
-    facts_summary: caseMeta.facts_summary || null,
-    demographics: currentRawFindings?.patient_demographics || {},
+    defendant_names: defendantNames,
+    dol: overrides["dol"] ?? (caseMeta.dol || null),
+    facts_summary: overrides["facts_summary"] ?? (caseMeta.facts_summary || null),
+    demographics: {
+      dob: demoField("dob"), address: demoField("address"), social_history: demoField("social_history"),
+      past_medical_history: demoField("past_medical_history"), family_history: demoField("family_history"),
+      surgical_history: demoField("surgical_history"), pcp: demoField("pcp"),
+    },
     record_sources: recordSources,
     rows,
     potential_issues: asItems(bySection.potential_issues),
@@ -1446,6 +1519,18 @@ function buildExportPayload() {
 // preview would mean a second, parallel document-generation path to keep in sync with the real one.
 // Reuses buildExportPayload() directly — the exact same data /export/docx renders — so the preview
 // can never drift out of sync with what actually gets exported.
+// Wraps a case-content value so it's clickable/editable in the preview modal (see
+// startEditingPreviewValue) — template labels/headings are plain text and never call this.
+// kind: "override" (case-level DOL/Facts/demographics/defendant_names or a per-row date/page/
+// source, saved via savePreviewOverride/the metadata_overrides table) or "finding-text" (a
+// timeline/potential-issue/discrepancy's own text, saved through the SAME edits[id] mechanism the
+// main review page already uses, so an edit made in either place shows up in both).
+function editableValue(editKey, value, { kind = "override", fallback = "(not provided)" } = {}) {
+  const display = realValue(value) ? escapeHtml(String(value)) : fallback;
+  const rawValue = value == null ? "" : String(value);
+  return `<span class="editable-value" data-edit-key="${escapeHtml(editKey)}" data-edit-kind="${kind}" data-value="${escapeHtml(rawValue)}">${display}</span>`;
+}
+
 function renderChronologyPreviewHtml(payload) {
   const field = (value, fallback = "(not provided)") => {
     const v = realValue(value);
@@ -1453,9 +1538,20 @@ function renderChronologyPreviewHtml(payload) {
   };
   const demo = payload.demographics || {};
 
+  // Mirrors _format_record_source_line in app.py exactly (same target format, same "skip a missing
+  // optional piece entirely rather than show a filler" rule) — kept as a separate JS implementation
+  // since the DOCX export is built server-side and this preview is pure client-side, but the two
+  // must never visually drift apart.
+  const formatRecordSourceLine = (e) => {
+    const leadBits = [e.facility, e.description, e.date].filter((v) => realValue(v));
+    const parts = [];
+    if (leadBits.length) parts.push(escapeHtml(leadBits.join(" ")));
+    if (realValue(e.label)) parts.push(`(${escapeHtml(e.label)})`);
+    if (e.page_count) parts.push(`${e.page_count} page${e.page_count !== 1 ? "s" : ""}`);
+    return parts.length ? parts.join(" &ndash; ") : "(not provided)";
+  };
   const recordSourcesHtml = payload.record_sources && payload.record_sources.length
-    ? `<ul class="preview-list">${payload.record_sources.map((e) =>
-        `<li>${escapeHtml(e.label || "")} = ${escapeHtml(e.filename || "")}</li>`).join("")}</ul>`
+    ? payload.record_sources.map((e) => `<p>${formatRecordSourceLine(e)}</p>`).join("")
     : `<p>(not provided)</p>`;
 
   const rowsHtml = payload.rows.length
@@ -1463,14 +1559,13 @@ function renderChronologyPreviewHtml(payload) {
         const headerBits = [r.record_type, r.author].filter((v) => realValue(v)).map((v) => escapeHtml(v));
         return `
         <tr class="${r.at_issue ? "preview-at-issue" : ""}">
-          <td>${field(r.date, "")}</td>
-          <td>${field(r.page, "")}</td>
-          <td>${field(r.record_type, "")}</td>
-          <td>${field(r.source, "")}</td>
-          <td>${headerBits.length ? `<strong>${headerBits.join(" -- ")}</strong><br>` : ""}${escapeHtml(r.text || "")}</td>
+          <td>${editableValue(`row:${r.id}:date`, r.date, { fallback: "" })}</td>
+          <td>${editableValue(`row:${r.id}:page`, r.page, { fallback: "" })}</td>
+          <td>${editableValue(`row:${r.id}:source`, r.source, { fallback: "" })}</td>
+          <td>${headerBits.length ? `<strong>${headerBits.join(" -- ")}</strong><br>` : ""}${editableValue(r.id, r.text, { kind: "finding-text", fallback: "" })}</td>
         </tr>`;
       }).join("")
-    : `<tr><td colspan="5">(no approved chronology entries yet)</td></tr>`;
+    : `<tr><td colspan="4">(no approved chronology entries yet)</td></tr>`;
 
   const listSection = (title, items, sourceLabel) => {
     if (!items.length) return "";
@@ -1478,7 +1573,7 @@ function renderChronologyPreviewHtml(payload) {
       <h3>${title}</h3>
       <ul class="preview-list">
         ${items.map((item) => `
-          <li>${escapeHtml(item.text || "")}
+          <li>${editableValue(item.id, item.text, { kind: "finding-text", fallback: "" })}
             ${item.citation ? `<div class="preview-citation">${sourceLabel}: ${escapeHtml(item.citation)}</div>` : ""}
           </li>`).join("")}
       </ul>`;
@@ -1488,20 +1583,23 @@ function renderChronologyPreviewHtml(payload) {
 
   return `
     <div class="preview-doc">
+      <div class="preview-doc-header">
+        <span>Confidential - ${field(payload.plaintiff_name)}</span>
+        <span>Page 1 of 1</span>
+      </div>
       <h2>COMBINED SUMMARY OF MEDICAL RECORDS / TIMELINE</h2>
       <p><strong>RE:</strong> ${field(payload.plaintiff_name)}</p>
       <p><strong>Updated:</strong> ${field(payload.generated_at)}</p>
-      <p><strong>DOL:</strong> ${field(payload.dol)}</p>
-      <p><strong>Facts:</strong> ${field(payload.facts_summary)}</p>
-      ${payload.defendant_names && payload.defendant_names.length
-        ? `<p><strong>Defendant(s):</strong> ${escapeHtml(payload.defendant_names.join(", "))}</p>` : ""}
-      <p><strong>DOB:</strong> ${field(demo.dob)}</p>
-      <p><strong>ADDRESS:</strong> ${field(demo.address)}</p>
-      <p><strong>Social Hx:</strong> ${field(demo.social_history)}</p>
-      <p><strong>PMHx:</strong> ${field(demo.past_medical_history)}</p>
-      <p><strong>FHx:</strong> ${field(demo.family_history)}</p>
-      <p><strong>SURGICAL HX:</strong> ${field(demo.surgical_history)}</p>
-      <p><strong>PCP:</strong> ${field(demo.pcp)}</p>
+      <p><strong>DOL:</strong> ${editableValue("dol", payload.dol)}</p>
+      <p><strong>Facts:</strong> ${editableValue("facts_summary", payload.facts_summary)}</p>
+      <p><strong>Defendant(s):</strong> ${editableValue("defendant_names", (payload.defendant_names || []).join(", "))}</p>
+      <p><strong>DOB:</strong> ${editableValue("demographics.dob", demo.dob)}</p>
+      <p><strong>ADDRESS:</strong> ${editableValue("demographics.address", demo.address)}</p>
+      <p><strong>Social Hx:</strong> ${editableValue("demographics.social_history", demo.social_history)}</p>
+      <p><strong>PMHx:</strong> ${editableValue("demographics.past_medical_history", demo.past_medical_history)}</p>
+      <p><strong>FHx:</strong> ${editableValue("demographics.family_history", demo.family_history)}</p>
+      <p><strong>SURGICAL HX:</strong> ${editableValue("demographics.surgical_history", demo.surgical_history)}</p>
+      <p><strong>PCP:</strong> ${editableValue("demographics.pcp", demo.pcp)}</p>
 
       <h3>ABBREVIATIONS AND RECORD SOURCES</h3>
       ${recordSourcesHtml}
@@ -1513,19 +1611,15 @@ function renderChronologyPreviewHtml(payload) {
       <table class="preview-table">
         <colgroup>
           <col class="preview-col-narrow"><col class="preview-col-narrow">
-          <col class="preview-col-narrow"><col class="preview-col-narrow">
+          <col class="preview-col-narrow">
           <col class="preview-col-desc">
         </colgroup>
-        <thead><tr><th>DATE</th><th>PAGE</th><th>RECORD</th><th>SOURCE</th><th>DESCRIPTION</th></tr></thead>
+        <thead><tr><th>DATE</th><th>PAGE</th><th>RECORD SOURCE</th><th>DESCRIPTION</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
 
       ${listSection("Potential Issues", payload.potential_issues, "Source")}
       ${listSection("Discrepancies", payload.discrepancies, "Sources")}
-
-      ${payload.summary ? `
-        <h3>AI-Drafted Summary (not independently verified — for context only)</h3>
-        <p>${escapeHtml(payload.summary)}</p>` : ""}
 
       <p class="preview-footer">
         Of ${payload.total} AI-generated findings: ${payload.approved} approved and included above,
@@ -1540,13 +1634,78 @@ function renderChronologyPreviewHtml(payload) {
 // viewer pane (roughly half the window's width) couldn't give enough room for. Vertical scrolling
 // within the modal is fine and expected for a long chronology.
 function showChronologyPreview() {
-  const payload = buildExportPayload();
-  chronologyPreviewEl.innerHTML = renderChronologyPreviewHtml(payload);
+  rerenderChronologyPreview();
   chronologyPreviewModal.style.display = "flex";
+}
+
+// Re-renders the preview from current state (used both for the initial open and after every
+// click-to-edit commit/cancel) — preserves scroll position across the re-render rather than
+// jumping back to the top, since re-rendering the whole modal is much simpler and safer than
+// surgically patching one DOM node, but shouldn't cost the reviewer their place in a long chronology.
+function rerenderChronologyPreview() {
+  const scrollTop = chronologyPreviewEl.scrollTop;
+  chronologyPreviewEl.innerHTML = renderChronologyPreviewHtml(buildExportPayload());
+  chronologyPreviewEl.scrollTop = scrollTop;
 }
 
 function hideChronologyPreview() {
   chronologyPreviewModal.style.display = "none";
+}
+
+// Click-to-edit: Enter (no Shift) saves, Shift+Enter inserts a newline without saving, Escape
+// reverts — matching Slack's message-composer convention, per the user's explicit request. Template
+// labels/headings are plain text (never carry the "editable-value" class) and so are never affected.
+chronologyPreviewEl.addEventListener("click", (e) => {
+  const span = e.target.closest(".editable-value");
+  if (!span) return;
+  startEditingPreviewValue(span);
+});
+
+function startEditingPreviewValue(span) {
+  const editKey = span.dataset.editKey;
+  const editKind = span.dataset.editKind;
+  const textarea = document.createElement("textarea");
+  textarea.className = "editable-value-input";
+  textarea.value = span.dataset.value || "";
+  span.replaceWith(textarea);
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+  let settled = false; // guards against commit() firing twice (Enter's keydown, then the blur the
+                        // resulting rerenderChronologyPreview() causes by removing this textarea)
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    const value = textarea.value;
+    if (editKind === "finding-text") {
+      if (findingsById[editKey]) {
+        findingsById[editKey].text = value;
+        findingsById[editKey].edited = true;
+      }
+      saveFindingEdits();
+    } else {
+      savePreviewOverride(editKey, value);
+    }
+    rerenderChronologyPreview();
+  };
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    rerenderChronologyPreview();
+  };
+
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation(); // don't also let the modal-level Escape handler close the whole modal
+      cancel();
+    }
+    // Shift+Enter: no special handling — the textarea's own default newline insertion just happens.
+  });
+  textarea.addEventListener("blur", commit);
 }
 
 previewChronologyBtn.addEventListener("click", showChronologyPreview);

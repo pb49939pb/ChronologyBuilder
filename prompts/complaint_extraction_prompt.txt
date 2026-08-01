@@ -3,23 +3,26 @@ the legal document stating the factual basis for the lawsuit. Your job is only t
 specific facts from it, not to summarize the whole document or offer any legal opinion.
 
 THE SINGLE MOST IMPORTANT RULE: IT IS ALWAYS BETTER TO OMIT A DETAIL THAN TO GUESS ONE
-If the document doesn't clearly state something, write "not stated" for that field (or an empty list
-for defendant_names) rather than inferring it. This document seeds the entire rest of the case
-analysis — an invented defendant name or date of loss would misdirect everything downstream.
+If the document doesn't clearly state something, write "not stated" for that field rather than
+inferring it. This document seeds the entire rest of the case analysis — an invented date of loss
+would misdirect everything downstream.
 
 EXTRACT EXACTLY THESE FIELDS
 - "plaintiff_name": the plaintiff's full name, as written in the document.
-- "defendant_names": every defendant named in the document who is a medical provider, clinic, or
-  hospital system (the kind of defendant this firm represents) — as a list of their names exactly as
-  written. Do not include non-medical defendants (e.g. an insurer named only for coverage purposes)
-  unless the document doesn't clearly distinguish them.
 - "dol": the Date of Loss — the date the alleged malpractice/negligent act occurred (not the date the
   complaint was filed, and not today's date). Write "not stated" if the document doesn't give one
   clear date for this.
-- "facts_summary": a short (2-4 sentence), neutral, plain-language summary of the factual allegations
-  — what the plaintiff claims happened and why it's alleged to be negligent. Do not adopt the
-  allegations as true, characterize them as true or false, or add any legal conclusion of your own —
-  simply state what is alleged.
+- "facts_summary": ONE to TWO sentences stating the core allegation as a claim, not an established
+  fact — what the defendant(s) allegedly failed to do, and the resulting harm. Never adopt the
+  allegation as true; always frame it as a claim (start with "Claims" or "Alleges").
+  MANDATORY: if the document states a clear Date of Loss (the same date you extracted for the "dol"
+  field above) or a clear date for the resulting injury/death, this sentence MUST explicitly include
+  that date, worked naturally into the sentence — do not write a date-free sentence when a clear date
+  is available elsewhere in the document. Only omit a date if the document truly never states one.
+  Example, with dates stated: "Claims defendants did not properly and timely recognize malignant
+  otitis media beginning 11/02/25, which led to the patient's death on 12/14/25."
+  Example, no clear date available: "Claims defendants negligently perforated the patient's bowel
+  during a laparoscopic procedure and failed to recognize the injury post-operatively."
 - "quote": a verbatim sentence or short passage, copied exactly from the document, that supports the
   Date of Loss you identified (or best identifies the case if no clear DOL sentence exists).
 
@@ -29,7 +32,6 @@ DOCUMENT:
 Respond with ONLY a JSON object matching this shape (no other text):
 {{
   "plaintiff_name": "...",
-  "defendant_names": ["..."],
   "dol": "...",
   "facts_summary": "...",
   "quote": "verbatim supporting text"

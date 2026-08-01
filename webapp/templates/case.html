@@ -29,6 +29,12 @@
         <label for="plaintiff-name">Plaintiff's name (this names the case)</label>
         <input type="text" id="plaintiff-name" name="plaintiff_name" placeholder="Jane Smith" required>
 
+        <label for="defendant-names">Defendant(s) (optional)</label>
+        <input type="text" id="defendant-names" name="defendant_names"
+               placeholder="e.g. Dr. R. Okafor, Adeline Medical Center — comma-separated">
+        <p class="field-hint">Enter these yourself rather than relying on the model to identify them from
+          the complaint — this also determines which findings get flagged "at issue" during analysis.</p>
+
         <label for="case-folder-input">Case folder</label>
         <input type="file" id="case-folder-input" webkitdirectory directory multiple required>
         <p id="case-folder-summary" class="field-hint" style="display:none;"></p>

@@ -51,6 +51,7 @@ form.addEventListener("submit", async (e) => {
   try {
     const body = new FormData();
     body.set("plaintiff_name", document.getElementById("plaintiff-name").value);
+    body.set("defendant_names", document.getElementById("defendant-names").value);
     body.set("priority_hint", document.getElementById("priority-hint").value);
     body.set("detail_level", DETAIL_LEVELS[document.getElementById("detail-slider").value]);
     appendFilesToFormData(body, caseFolderInput.files);

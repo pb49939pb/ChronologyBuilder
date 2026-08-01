@@ -120,6 +120,15 @@ def init_db() -> None:
                     exported_at REAL NOT NULL,
                     PRIMARY KEY (job_id, group_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS metadata_overrides (
+                    job_id TEXT NOT NULL REFERENCES cases(job_id) ON DELETE CASCADE,
+                    group_key TEXT NOT NULL,
+                    field_key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (job_id, group_key, field_key)
+                );
                 """
             )
             conn.commit()
@@ -376,6 +385,41 @@ def count_decided(job_id: str) -> dict[str, int]:
     finally:
         conn.close()
     return {r["group_key"]: r["n"] for r in rows}
+
+
+# --- Editable preview-modal overrides (Case Mode only) -----------------------------------------
+# Case-level metadata a reviewer edits directly in the chronology preview (DOL, Facts, demographics,
+# defendant names) — distinct from review_actions (per-finding approve/reject/edit) and added_facts
+# (reviewer-added Key Facts). One row per edited field, upserted; unedited fields simply have no row
+# and the caller falls back to the original AI-extracted/manually-entered value.
+
+def save_metadata_override(job_id: str, group_key: str, field_key: str, value: str) -> None:
+    with _write_lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO metadata_overrides (job_id, group_key, field_key, value, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, group_key, field_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                """,
+                (job_id, group_key, field_key, value, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def load_metadata_overrides(job_id: str, group_key: str) -> dict[str, str]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT field_key, value FROM metadata_overrides WHERE job_id=? AND group_key=?",
+            (job_id, group_key),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r["field_key"]: r["value"] for r in rows}
 
 
 def delete_case(job_id: str) -> None:

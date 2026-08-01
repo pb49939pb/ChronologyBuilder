@@ -27,15 +27,17 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pdfplumber
 import requests
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 from PIL import Image, ImageOps
-from werkzeug.utils import secure_filename
 from flask import (
     Flask,
     Response,
@@ -214,6 +216,9 @@ PROMPT_TEMPLATE = PROMPT_PATH.read_text()
 COMPLAINT_PROMPT_PATH = _resource_path("prompts", "complaint_extraction_prompt.txt")
 COMPLAINT_PROMPT_TEMPLATE = COMPLAINT_PROMPT_PATH.read_text()
 
+CASE_SYNTHESIS_PROMPT_PATH = _resource_path("prompts", "case_synthesis_prompt.txt")
+CASE_SYNTHESIS_PROMPT_TEMPLATE = CASE_SYNTHESIS_PROMPT_PATH.read_text()
+
 DETAIL_LEVELS = {
     "brief": (
         "Report only the most significant findings: major procedures, diagnoses, hospital "
@@ -344,12 +349,14 @@ RESPONSE_SCHEMA = {
                 "family_history", "surgical_history", "pcp",
             ],
         },
-        # One short, content-derived display label per source document (e.g. "FairviewOpReport" for
-        # an operative report from Fairview) — used in the export/UI's SOURCE column instead of the
-        # raw filename, since a real production's filenames aren't always meaningful. Uniqueness is
-        # NOT trusted to the model — enforced deterministically server-side (see
+        # One short, content-derived abbreviation per source document (e.g. "Fairview Op" for an
+        # operative report from Fairview) — used in the export/UI's RECORD SOURCE column instead of
+        # the raw filename, since a real production's filenames aren't always meaningful. Uniqueness
+        # is NOT trusted to the model — enforced deterministically server-side (see
         # _resolve_record_sources), the same reasoning as everywhere else a hard correctness
-        # requirement exists in this app.
+        # requirement exists in this app. "facility"/"description"/"date" feed the Abbreviations/
+        # Record Sources legend line (see _format_record_source_line) — all three degrade gracefully
+        # when a document doesn't clearly state them, only "source_file"/"label" are required.
         "record_sources": {
             "type": "array",
             "items": {
@@ -357,6 +364,9 @@ RESPONSE_SCHEMA = {
                 "properties": {
                     "source_file": {"type": "string"},
                     "label": {"type": "string"},
+                    "facility": {"type": "string"},
+                    "description": {"type": "string"},
+                    "date": {"type": "string"},
                 },
                 "required": ["source_file", "label"],
             },
@@ -373,12 +383,22 @@ COMPLAINT_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "plaintiff_name": {"type": "string"},
-        "defendant_names": {"type": "array", "items": {"type": "string"}},
         "dol": {"type": "string"},
         "facts_summary": {"type": "string"},
         "quote": {"type": "string"},
     },
-    "required": ["plaintiff_name", "defendant_names", "dol", "facts_summary", "quote"],
+    # Deliberately no "defendant_names" — the reviewer enters these herself when starting the case
+    # (see the case-start form), rather than trusting the model to identify them from the complaint.
+    "required": ["plaintiff_name", "dol", "facts_summary", "quote"],
+}
+
+CASE_SYNTHESIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "dol": {"type": "string"},
+        "summary": {"type": "string"},
+    },
+    "required": ["dol", "summary"],
 }
 
 PORT = int(os.environ.get("LAWFIRMAGENT_PORT", "5050"))
@@ -571,6 +591,41 @@ def _extract_complaint_info(pdf_path: Path) -> dict:
     return json.loads(resp.json()["response"])
 
 
+def _synthesize_case_summary(
+    timeline: list, complaint_dol: str | None, facts_summary: str | None, case_context: str,
+) -> dict:
+    """One schema-constrained Ollama call over the PRIMARY group's already-merged, deduped
+    timeline — not raw documents — run once chunking/merging is entirely done. This is what lets it
+    see the WHOLE case at once (each chunk's own model call, by contrast, only ever sees its own
+    slice): determining a real Date of Loss grounded in the actual timeline rather than just the
+    complaint's own (often vague/single-date) statement, and writing one coherent summary instead of
+    _merge_chunk_findings' `[Part 1]/[Part 2]` concatenation, which that function's own docstring
+    already documents as unable to notice a cross-chunk trend. Feasible regardless of case size
+    specifically because the input here is already-condensed extracted facts, not raw document text —
+    the same insight that motivated chunking in the first place. Raises on a request/JSON error, same
+    as _extract_complaint_info — the caller (_run_case_job/_run_case_rescan) decides how to degrade.
+    """
+    timeline_text = "\n".join(
+        f"- {item.get('date') or 'not stated'}: {item.get('text') or ''}" for item in timeline
+    ) or "(no timeline entries)"
+    prompt = CASE_SYNTHESIS_PROMPT_TEMPLATE.format(
+        case_context=case_context or "(no case context available)",
+        complaint_dol=complaint_dol or "not stated",
+        facts_summary=facts_summary or "not stated",
+        timeline_text=timeline_text,
+    )
+    payload = {
+        "model": MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": CASE_SYNTHESIS_SCHEMA,
+        "options": {"num_ctx": NUM_CTX},
+    }
+    resp = requests.post(OLLAMA_URL, json=payload, timeout=1800)
+    resp.raise_for_status()
+    return json.loads(resp.json()["response"])
+
+
 def _build_case_context(
     plaintiff_name: str, defendant_names: list, dol: str | None,
     facts_summary: str | None, priority_hint: str,
@@ -648,6 +703,7 @@ def _merge_incremental_group_result(existing_group: dict, new_result: dict) -> d
         "findings": combined,
         "source_filenames": all_source_filenames,
         "record_source_labels": _resolve_record_sources(combined, all_source_filenames),
+        "page_counts": {**(existing_group.get("page_counts") or {}), **new_result["page_counts"]},
         "warnings": (existing_group.get("warnings") or []) + new_result["warnings"],
         "ocr_files": (existing_group.get("ocr_files") or []) + new_result["ocr_files"],
         "stats": {
@@ -1036,6 +1092,29 @@ def architecture():
 _AT_ISSUE_RGB = RGBColor(150, 40, 30)
 
 
+def _add_page_number_field(paragraph, instr: str) -> None:
+    """Inserts a live Word field code (e.g. "PAGE" or "NUMPAGES") into `paragraph` — python-docx has
+    no high-level API for these, since the actual number only exists once Word itself paginates the
+    document on open/print. This builds the same raw OOXML field-code sequence Word's own Insert
+    Page Number feature produces, so "Page X of Y" stays accurate no matter how long the export is."""
+    run = paragraph.add_run()
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(10)
+    fld_begin = OxmlElement("w:fldChar")
+    fld_begin.set(qn("w:fldCharType"), "begin")
+    instr_el = OxmlElement("w:instrText")
+    instr_el.set(qn("xml:space"), "preserve")
+    instr_el.text = f" {instr} "
+    fld_separate = OxmlElement("w:fldChar")
+    fld_separate.set(qn("w:fldCharType"), "separate")
+    fld_end = OxmlElement("w:fldChar")
+    fld_end.set(qn("w:fldCharType"), "end")
+    run._r.append(fld_begin)
+    run._r.append(instr_el)
+    run._r.append(fld_separate)
+    run._r.append(fld_end)
+
+
 @app.route("/export/docx", methods=["POST"])
 def export_docx():
     """Renders the reviewer's approved chronology as a real Microsoft Word document (Times New
@@ -1068,6 +1147,25 @@ def export_docx():
     normal = doc.styles["Normal"]
     normal.font.name = "Times New Roman"
     normal.font.size = Pt(12)
+
+    # Repeats on every printed/exported page (a real Word header, not just the first line of body
+    # text) — confidentiality marking plus live pagination, both standard for a legal document like
+    # this. "Page X of Y" uses real field codes (see _add_page_number_field) rather than a computed
+    # number, since the actual page count doesn't exist until Word paginates the finished document.
+    header_para = doc.sections[0].header.paragraphs[0]
+    header_para.alignment = 1  # WD_ALIGN_PARAGRAPH.CENTER — avoids importing the enum for one use
+    confidential_run = header_para.add_run(
+        f"CONFIDENTIAL - {field(data.get('plaintiff_name'), '(not provided)')}          Page "
+    )
+    confidential_run.font.name = "Times New Roman"
+    confidential_run.font.size = Pt(10)
+    confidential_run.bold = True
+    _add_page_number_field(header_para, "PAGE")
+    of_run = header_para.add_run(" of ")
+    of_run.font.name = "Times New Roman"
+    of_run.font.size = Pt(10)
+    of_run.bold = True
+    _add_page_number_field(header_para, "NUMPAGES")
 
     def heading(text, size=15, bold=True):
         p = doc.add_paragraph()
@@ -1102,7 +1200,11 @@ def export_docx():
     record_sources = data.get("record_sources") or []
     if record_sources:
         for entry in record_sources:
-            doc.add_paragraph(f"{entry.get('label', '')} = {entry.get('filename', '')}", style="List Bullet")
+            line = _format_record_source_line(
+                entry.get("facility"), entry.get("description"), entry.get("date"),
+                entry.get("label"), entry.get("page_count"),
+            )
+            doc.add_paragraph(line)
     else:
         doc.add_paragraph("(not provided)")
 
@@ -1114,9 +1216,9 @@ def export_docx():
     # The column headers are part of the template's fixed skeleton (matching the blank template
     # this is meant to always look like the starting point of) — always shown, even before any
     # chronology entries have been approved, rather than only appearing once there's data.
-    table = doc.add_table(rows=1, cols=5)
+    table = doc.add_table(rows=1, cols=4)
     table.style = "Table Grid"
-    for cell, text in zip(table.rows[0].cells, ("DATE", "PAGE", "RECORD", "SOURCE", "DESCRIPTION")):
+    for cell, text in zip(table.rows[0].cells, ("DATE", "PAGE", "RECORD SOURCE", "DESCRIPTION")):
         run = cell.paragraphs[0].add_run(text)
         run.bold = True
         run.font.name = "Times New Roman"
@@ -1136,10 +1238,9 @@ def export_docx():
 
             set_cell(cells[0], field(r.get("date"), ""))
             set_cell(cells[1], field(r.get("page"), ""))
-            set_cell(cells[2], field(r.get("record_type"), ""))
-            set_cell(cells[3], field(r.get("source"), ""))
+            set_cell(cells[2], field(r.get("source"), ""))
             header_bits = [b for b in (field(r.get("record_type"), ""), field(r.get("author"), "")) if b]
-            desc_para = cells[4].paragraphs[0]
+            desc_para = cells[3].paragraphs[0]
             if header_bits:
                 bold_run = desc_para.add_run(" -- ".join(header_bits) + "\n")
                 bold_run.bold = True
@@ -1154,7 +1255,7 @@ def export_docx():
                 body_run.font.color.rgb = _AT_ISSUE_RGB
     else:
         cells = table.add_row().cells
-        cells[0].merge(cells[1]).merge(cells[2]).merge(cells[3]).merge(cells[4])
+        cells[0].merge(cells[1]).merge(cells[2]).merge(cells[3])
         cells[0].paragraphs[0].add_run("(no approved chronology entries yet)")
 
     if data.get("potential_issues"):
@@ -1176,11 +1277,6 @@ def export_docx():
                 run = p.add_run(f"Sources: {item['citation']}")
                 run.italic = True
                 run.font.size = Pt(10)
-
-    summary = data.get("summary") or ""
-    if summary:
-        heading("AI-Drafted Summary (not independently verified — for context only)", size=13)
-        doc.add_paragraph(summary)
 
     footer = doc.add_paragraph()
     footer_run = footer.add_run(
@@ -1452,6 +1548,53 @@ def _call_model_for_chunk(records_text: str, detail_level: str, case_context: st
 
 _DATED_LIST_FIELDS = ("timeline", "medications", "procedures", "diagnoses", "labs")
 
+# Every format actually seen coming out of real medical records/EHR exports so far — tried in
+# order, first match wins. Deliberately a fixed list rather than a lenient general-purpose parser
+# (python-dateutil-style guessing): an unrecognized format is left completely alone rather than
+# risk silently misreading it, same "omit rather than guess" principle the prompts already use for
+# the model's own extraction.
+_DATE_INPUT_FORMATS = (
+    "%m/%d/%Y", "%m/%d/%y",                              # already slash-separated
+    "%m-%d-%Y", "%m-%d-%y",                              # dash-separated, US order
+    "%Y-%m-%d", "%y-%m-%d",                              # ISO, sometimes seen in EHR exports
+    "%B %d, %Y", "%B %d %Y", "%B %d, %y", "%B %d %y",    # "March 4, 2026"
+    "%b %d, %Y", "%b %d %Y", "%b %d, %y", "%b %d %y",    # "Mar 4, 2026"
+    "%d %B %Y", "%d %b %Y",                              # "4 March 2026"
+    "%d-%b-%Y", "%d-%B-%Y",                              # "04-Mar-2026"
+)
+
+
+def _normalize_date_str(raw: str) -> str:
+    """Best-effort reformat to this app's standard chronology date format, MM/DD/YY (e.g.
+    "03/04/26") — always slash-separated, never dashes. Deterministic and code-side, not a prompt
+    instruction: the model is asked to extract each date verbatim from its source (needed for exact
+    citation matching), and reformatting is exactly the kind of transformation step that's invited
+    hallucination before (see the prompts' own "don't invent a clock time" note) — so this is a
+    fixed, auditable parse-and-reformat pass applied afterward, not something asked of the model.
+    Returns `raw` unchanged if it doesn't cleanly match one of _DATE_INPUT_FORMATS.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    for fmt in _DATE_INPUT_FORMATS:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        return parsed.strftime("%m/%d/%y")
+    return raw
+
+
+def _normalize_dates(findings: dict) -> None:
+    """Mutates `findings` in place — every dated-entry list's "date" field reformatted via
+    _normalize_date_str. Called once per pipeline right alongside the other post-processing passes
+    (_resolve_bates/_dedupe_all_with_multi_source/_assign_finding_ids) — safe to run at any point
+    relative to those, since none of them key off of "date" (Bates resolution and dedup both key off
+    "quote"/"text", never "date")."""
+    for key in _DATED_LIST_FIELDS:
+        for item in findings.get(key, []) or []:
+            item["date"] = _normalize_date_str(item.get("date", ""))
+
 
 def _looks_degenerate(findings: dict) -> bool:
     """True if every dated-entry list AND the summary came back empty — a strong signal of the
@@ -1619,14 +1762,23 @@ def _assign_finding_ids(findings: dict) -> None:
             seen[base_id] = n + 1
 
 
+def _cap_label_words(label: str, max_words: int = 2) -> str:
+    """Enforces the "2 words max" rule server-side rather than trusting the model's own compliance
+    (same "don't trust the model's own claim, enforce deterministically" reasoning already used for
+    uniqueness below) — collapses repeated whitespace to single spaces and truncates to the first
+    `max_words` words."""
+    words = re.sub(r"\s+", " ", label.strip()).split(" ")
+    return " ".join(w for w in words[:max_words] if w)
+
+
 def _slugify_label(filename: str) -> str:
     """Fallback label derived purely from a filename — used when the model didn't cover a source
-    file at all (or hallucinated one that doesn't match anything real). Title-cased,
-    non-alphanumeric characters stripped, matching the style asked of the model
-    (e.g. "op_report_v2.pdf" -> "OpReportV2")."""
+    file at all (or hallucinated one that doesn't match anything real). Title-cased, non-alphanumeric
+    characters treated as word boundaries, capped at 2 words to match the style asked of the model
+    (e.g. "op_report_v2.pdf" -> "Op Report")."""
     stem = Path(filename).stem
-    words = re.split(r"[^A-Za-z0-9]+", stem)
-    return "".join(w.capitalize() for w in words if w) or "Record"
+    words = [w.capitalize() for w in re.split(r"[^A-Za-z0-9]+", stem) if w]
+    return " ".join(words[:2]) or "Record"
 
 
 def _resolve_record_sources(findings: dict, source_filenames: list) -> dict:
@@ -1640,7 +1792,7 @@ def _resolve_record_sources(findings: dict, source_filenames: list) -> dict:
     model_labels = {}
     for item in findings.get("record_sources", []) or []:
         src = item.get("source_file")
-        label = re.sub(r"\s+", "", (item.get("label") or "").strip())
+        label = _cap_label_words(item.get("label") or "")
         if src in source_filenames and label:
             model_labels[src] = label
 
@@ -1651,11 +1803,30 @@ def _resolve_record_sources(findings: dict, source_filenames: list) -> dict:
         candidate = base
         n = 2
         while candidate.lower() in seen_lower:
-            candidate = f"{base}{n}"
+            candidate = f"{base} {n}"
             n += 1
         seen_lower.add(candidate.lower())
         labels[src] = candidate
     return labels
+
+
+def _format_record_source_line(facility, description, date, label, page_count) -> str:
+    """One line for the Abbreviations/Record Sources legend: "{Facility} – {Description} {date} –
+    ({Abbreviation}) – {N page(s)}" — e.g. "Beaumont – Canton CT Temporal Report 7.27.21 – (CT Temp)
+    – 2 pages". Unlike the fixed-slot chronology table, a legend line has no fixed shape to
+    preserve — any missing optional piece (facility/description/date, all best-effort since not every
+    document clearly states them) is skipped entirely rather than shown as a "(not provided)"
+    filler, so a sparse document still reads as a normal, complete-looking line rather than a
+    template with visible gaps."""
+    lead_bits = [b for b in (facility, description, date) if b and _realish(b)]
+    parts = []
+    if lead_bits:
+        parts.append(" ".join(lead_bits))
+    if label and _realish(label):
+        parts.append(f"({label})")
+    if page_count:
+        parts.append(f"{page_count} page{'s' if page_count != 1 else ''}")
+    return " – ".join(parts) if parts else "(not provided)"
 
 
 # Label variants to grep for per patient_demographics subfield — see _verify_demographics_with_grep.
@@ -1789,6 +1960,7 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
     ocr_files = []
     source_filenames = []
     filename_to_text = {}  # for _resolve_bates below — the exact per-file text the model actually saw
+    page_counts = {}  # for the Record Sources legend's "N page(s)" — a hard fact, never model-derived
     total_pages = 0
 
     for i, pdf_path in enumerate(pdf_paths, start=1):
@@ -1830,6 +2002,7 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
         records_parts.append(f"### Document {i} — {pdf_path.name}\n\n{clean_text}")
         source_filenames.append(pdf_path.name)
         filename_to_text[pdf_path.name] = clean_text
+        page_counts[pdf_path.name] = num_pages
 
     if not records_parts:
         raise ValueError("No extractable text found in any document for this patient group.")
@@ -1892,6 +2065,7 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
             on_progress(done_label, partial)
 
     findings = _merge_chunk_findings(chunk_results) if len(chunk_results) > 1 else chunk_results[0]
+    _normalize_dates(findings)
     _resolve_bates(findings, filename_to_text)
     _dedupe_all_with_multi_source(findings)
     _assign_finding_ids(findings)  # after dedup, so a merged item's id is computed on its final
@@ -1916,6 +2090,7 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
         "ocr_files": ocr_files,
         "source_filenames": source_filenames,
         "record_source_labels": record_source_labels,
+        "page_counts": page_counts,
     }
 
 
@@ -1933,6 +2108,23 @@ def _copy_files_into_session(session_dir: Path, files: list) -> list:
     return copied_paths
 
 
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f\\/:*?"<>|]')
+
+
+def _sanitize_filename_segment(name: str) -> str:
+    """Strips only characters that are genuinely unsafe in a filesystem path segment (control
+    characters, path separators, and the handful of characters Windows disallows in a filename) —
+    deliberately NOT Werkzeug's secure_filename(), which is far more aggressive than path-traversal
+    safety actually requires and replaces spaces (along with most punctuation) with underscores.
+    Real medical record filenames commonly contain spaces and carry real information in them (e.g.
+    "Beaumont - Canton CT Temporal Report 7.27.21.pdf") that a mangled underscore-name loses for
+    display purposes (record source labels, the abbreviations legend) — preserving them here doesn't
+    weaken path-traversal safety, which _safe_relative_path already enforces separately by stripping
+    ".."/"." segments before this ever runs."""
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("", name).strip()
+    return cleaned or "_"
+
+
 def _safe_relative_path(raw_path: str) -> Path | None:
     """Sanitizes a browser-supplied relative path (a webkitRelativePath, e.g.
     "case_smith/pleadings/complaint.pdf", arriving as an uploaded file's filename) into something
@@ -1941,8 +2133,8 @@ def _safe_relative_path(raw_path: str) -> Path | None:
     folder structure the browser sent (needed so _find_complaint_file's "prefer a pleadings/
     subfolder" check keeps working, and so identity for incremental rescans is stable). Returns None
     if nothing safe is left (e.g. an empty or entirely "." /".." path)."""
-    parts = [secure_filename(p) for p in raw_path.replace("\\", "/").split("/") if p not in ("", ".", "..")]
-    parts = [p for p in parts if p]  # secure_filename can reduce a segment to "" (e.g. pure punctuation)
+    parts = [_sanitize_filename_segment(p) for p in raw_path.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    parts = [p for p in parts if p]
     return Path(*parts) if parts else None
 
 
@@ -1975,7 +2167,7 @@ def _save_uploaded_case_files(job_id: str, file_storages: list) -> tuple[Path, l
 
 
 def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_level: str,
-                   plaintiff_name: str, priority_hint: str) -> None:
+                   plaintiff_name: str, priority_hint: str, defendant_names: list) -> None:
     """Runs entirely in a background thread (see /case/start). A case is one plaintiff by default —
     unlike the old "group an unknown folder of mixed patients" design this replaced, the primary
     group is always the plaintiff named when the case was started, not something inferred from
@@ -2019,17 +2211,16 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
     _save_batch_manifest(job_id, manifest)
 
     complaint_path = _find_complaint_file(pdf_paths, folder)
-    defendant_names, dol, facts_summary, complaint_warning = [], None, None, None
+    dol, facts_summary, complaint_warning = None, None, None
     if complaint_path:
         try:
             complaint_info = _extract_complaint_info(complaint_path)
-            defendant_names = complaint_info.get("defendant_names") or []
             dol = complaint_info.get("dol")
             facts_summary = complaint_info.get("facts_summary")
         except Exception as e:
             complaint_warning = (
                 f"Found a likely Complaint/NOI ({complaint_path.name}) but couldn't read it: {e}. "
-                "Proceeding without case context — DOL, defendant name(s), and Facts will be blank."
+                "Proceeding without case context — DOL and Facts will be blank."
             )
             applog.log_event(
                 "complaint_extraction_failed", f"Failed to extract complaint info: {type(e).__name__}",
@@ -2040,8 +2231,8 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
         complaint_warning = (
             "No Complaint/Notice of Intent file was found in this case's folder (checked filenames "
             "for \"complaint\"/\"notice of intent\"/\"NOI\", preferring a 'pleadings' subfolder). "
-            "DOL, defendant name(s), and Facts will be blank below — you can still review and fill "
-            "these in manually on export."
+            "DOL and Facts will be blank below — you can still review and fill these in manually on "
+            "export."
         )
 
     manifest.update({
@@ -2153,7 +2344,26 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
                 "ocr_files": result["ocr_files"],
                 "source_filenames": result["source_filenames"],
                 "record_source_labels": result["record_source_labels"],
+                "page_counts": result["page_counts"],
             })
+            # Case-level DOL/summary synthesis — only for the primary (plaintiff) group, and only
+            # after its own findings are fully in the manifest above (a synthesis failure here must
+            # never lose the group's own already-successful chronology). See _synthesize_case_summary.
+            if key == primary_key:
+                try:
+                    synthesis = _synthesize_case_summary(
+                        result["findings"].get("timeline", []), dol, facts_summary, case_context,
+                    )
+                    manifest["dol"] = synthesis.get("dol") or dol
+                    manifest["groups"][key]["findings"]["summary"] = (
+                        synthesis.get("summary") or result["findings"].get("summary")
+                    )
+                except Exception as e:
+                    applog.log_event(
+                        "case_synthesis_failed", f"Case-level DOL/summary synthesis failed: {type(e).__name__}",
+                        level="WARNING", context={"job_id": job_id}, exc_info=sys.exc_info(),
+                    )
+                _save_batch_manifest(job_id, manifest)
             # Recorded so a LATER rescan (see _run_case_rescan) knows these files are already
             # processed and only reprocesses genuinely new ones — paths relative to this job's own
             # source_dir (folder), not the copied session-dir paths, and not an absolute path either
@@ -2307,6 +2517,7 @@ def _run_case_rescan(job_id: str) -> None:
                         "warnings": new_result["warnings"], "ocr_files": new_result["ocr_files"],
                         "source_filenames": new_result["source_filenames"],
                         "record_source_labels": new_result["record_source_labels"],
+                        "page_counts": new_result["page_counts"],
                         "file_count": len(g["files"]),
                     })
                 else:
@@ -2317,8 +2528,27 @@ def _run_case_rescan(job_id: str) -> None:
                         "warnings": merged["warnings"], "ocr_files": merged["ocr_files"],
                         "source_filenames": merged["source_filenames"],
                         "record_source_labels": merged["record_source_labels"],
+                        "page_counts": merged["page_counts"],
                         "file_count": manifest["groups"][key].get("file_count", 0) + len(g["files"]),
                     })
+
+                # Re-run case-level DOL/summary synthesis so it reflects the now-updated primary
+                # timeline — same reasoning and failure handling as _run_case_job's own call.
+                if key == primary_key:
+                    try:
+                        synthesis = _synthesize_case_summary(
+                            manifest["groups"][key]["findings"].get("timeline", []),
+                            manifest.get("dol"), manifest.get("facts_summary"), case_context,
+                        )
+                        manifest["dol"] = synthesis.get("dol") or manifest.get("dol")
+                        manifest["groups"][key]["findings"]["summary"] = (
+                            synthesis.get("summary") or manifest["groups"][key]["findings"].get("summary")
+                        )
+                    except Exception as e:
+                        applog.log_event(
+                            "case_synthesis_failed", f"Case-level DOL/summary synthesis failed: {type(e).__name__}",
+                            level="WARNING", context={"job_id": job_id}, exc_info=sys.exc_info(),
+                        )
 
                 db.record_processed_files(job_id, key, [str(p.relative_to(folder)) for p in g["files"]])
             except Exception as e:
@@ -2358,6 +2588,7 @@ def case_start():
     that older design was replaced. `files` here is every PDF (and everything else) the picker found
     inside the chosen folder, each carrying its path relative to that folder as its filename."""
     plaintiff_name = request.form.get("plaintiff_name", "").strip()
+    defendant_names = [n.strip() for n in re.split(r"[,\n]", request.form.get("defendant_names", "")) if n.strip()]
     priority_hint = request.form.get("priority_hint", "").strip()
     detail_level = request.form.get("detail_level", DEFAULT_DETAIL_LEVEL)
     if detail_level not in DETAIL_LEVELS:
@@ -2376,7 +2607,7 @@ def case_start():
 
     thread = threading.Thread(
         target=_run_case_job,
-        args=(job_id, source_dir, folder_display_name, detail_level, plaintiff_name, priority_hint),
+        args=(job_id, source_dir, folder_display_name, detail_level, plaintiff_name, priority_hint, defendant_names),
         daemon=True,
     )
     thread.start()
@@ -2564,6 +2795,7 @@ def case_group_results(job_id, group_key):
         "progress_text": group.get("progress_text"),
         "case": case_meta,
         "record_source_labels": group.get("record_source_labels", {}),
+        "page_counts": group.get("page_counts", {}),
         # Durable reviewer state (approve/reject/edits/added facts) — lets a genuinely fresh
         # browser tab (no sessionStorage for this session yet, e.g. reopening a case from a month
         # ago) pick up exactly where a previous review session left off. See db.py's
@@ -2571,6 +2803,7 @@ def case_group_results(job_id, group_key):
         # first load, then sessionStorage stays the synchronous source of truth as before.
         "review_state": db.load_review_state(job_id, group_key),
         "added_facts": db.load_added_facts(job_id, group_key),
+        "metadata_overrides": db.load_metadata_overrides(job_id, group_key),
         "review_progress": _compute_review_status(job_id, group_key, group, db.count_decided(job_id)),
         "exported_at": db.get_exported_map(job_id).get(group_key),
         "rescan_status": manifest.get("rescan_status"),
@@ -2628,6 +2861,22 @@ def case_save_summary_edit(job_id, group_key):
         return err
     data = request.get_json(force=True) or {}
     db.save_review_action(job_id, group_key, "__summary__", kind="summary", edited_text=data.get("text"))
+    return jsonify({"ok": True})
+
+
+@app.route("/case/<job_id>/<group_key>/metadata_edit", methods=["POST"])
+def case_save_metadata_edit(job_id, group_key):
+    """Durable backstop for the preview modal's click-to-edit case-content values (DOL, Facts,
+    demographics, defendant names) — same fire-and-forget-alongside-sessionStorage pattern as
+    /edit and /summary_edit above, just keyed by an arbitrary field_key instead of a finding id."""
+    err = _require_case_group(job_id, group_key)
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    field_key = data.get("field_key")
+    if not field_key:
+        return jsonify({"error": "field_key required"}), 400
+    db.save_metadata_override(job_id, group_key, field_key, data.get("value") or "")
     return jsonify({"ok": True})
 
 
@@ -2715,6 +2964,7 @@ def analyze():
                          # pdf.js to search), so the frontend uses this to show an accurate message
                          # instead of the generic "couldn't locate the quote" one.
         filename_to_text = {}  # for _resolve_bates below — the exact per-file text the model saw
+        page_counts = {}  # for the Record Sources legend's "N page(s)" — a hard fact, never model-derived
         total_pages = 0
 
         for i, pdf_path in enumerate(pdf_paths, start=1):
@@ -2760,6 +3010,7 @@ def analyze():
 
             records_parts.append(f"### Document {i} — {pdf_path.name}\n\n{clean_text}")
             filename_to_text[pdf_path.name] = clean_text
+            page_counts[pdf_path.name] = num_pages
             yield _event({
                 "stage": "extract", "index": i, "total": total_files,
                 "filename": pdf_path.name, "pages": num_pages, "ok": ok,
@@ -2851,6 +3102,7 @@ def analyze():
             })
             return
 
+        _normalize_dates(findings)
         _resolve_bates(findings, filename_to_text)
         _dedupe_all_with_multi_source(findings)
         _assign_finding_ids(findings)
@@ -2874,6 +3126,7 @@ def analyze():
             "warnings": warnings,
             "ocr_files": ocr_files,
             "record_source_labels": record_source_labels,
+            "page_counts": page_counts,
         })
 
     resp = Response(stream_with_context(generate()), mimetype="application/x-ndjson")

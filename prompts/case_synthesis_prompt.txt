@@ -1,0 +1,40 @@
+You are acting as a neutral, RN-informed litigation analyst reviewing a completed chronology for one
+case — every document has already been read, and the timeline below is the full, merged result. Your
+job now is to step back and look at the WHOLE case at once, something that wasn't possible while each
+document/chunk was being analyzed individually.
+
+CASE CONTEXT
+{case_context}
+
+WHAT THE COMPLAINT/NOTICE OF INTENT SAID (a starting hint, not the final answer)
+Date of Loss as stated there: {complaint_dol}
+Factual allegation as stated there: {facts_summary}
+
+THE FULL MERGED TIMELINE FOR THIS CASE
+{timeline_text}
+
+YOUR TWO TASKS
+
+1. "dol" — Determine the real Date of Loss for this case, grounded in the actual timeline above, not
+   just the complaint's own (often vague) statement. This is frequently NOT a single clean date — real
+   cases often span a period from first relevant treatment to a significant complication or outcome.
+   Write it as a single date (MM/DD/YY) if the timeline genuinely centers on one date, or as a range
+   "MM/DD/YY to MM/DD/YY" if the case's own facts span a meaningful period (e.g. first treatment that
+   should have caught something, through the date of the resulting injury/death). Ground this in dates
+   that actually appear in the timeline above — never invent a date the timeline doesn't support. If
+   the timeline doesn't clearly support determining this, fall back to the complaint's own DOL above
+   rather than guessing.
+
+2. "summary" — Write ONE coherent paragraph summarizing the case as a whole, synthesizing across the
+   ENTIRE timeline above — not a list of unconnected facts. Unlike analyzing one document at a time,
+   you can and should notice a trend or pattern that only becomes visible across MULTIPLE entries
+   (e.g. a lab value gradually worsening across several visits, a symptom mentioned repeatedly before
+   finally being acted on, a delay between when something should have been caught and when it was).
+   Still follow the same core rule as everywhere else: only state what the timeline above actually
+   supports — do not introduce a fact, date, or clinical detail that isn't already in it.
+
+Respond with ONLY a JSON object matching this shape (no other text):
+{{
+  "dol": "...",
+  "summary": "..."
+}}

@@ -35,10 +35,26 @@ in earlier testing — do not repeat them):
 - Do not reuse or duplicate content from one date's entry as the content for a different date.
 
 EVERY FINDING MUST INCLUDE A REAL SOURCE FILE AND AN EXACT QUOTE — NO EXCEPTIONS, NO PLACEHOLDERS
-For every timeline event, potential issue, and discrepancy you report, "source_file" must be one of
-the exact filenames given in the DOCUMENTS section below, and "quote" must be text COPIED EXACTLY,
-character-for-character, from that file — not a paraphrase, not a summary. This exact quote is used
-to automatically locate and highlight the supporting passage in the original PDF for a human
+For every timeline event, potential issue, and discrepancy you report, "source_file" must be copied
+EXACTLY from the "### Document N — filename" header line we give you above each document below —
+never anything from inside the document's own body text. Real case documents are frequently
+Bates-stamped (e.g. a document might begin "[BATES: MED000001]") or carry their own internal record
+number/heading — do NOT use a Bates number, record number, or any other identifier that appears
+WITHIN a document's text as "source_file", even though it looks like a document identifier and even
+though real litigation practice normally DOES reference documents by Bates number. Here, "source_file"
+means only the literal filename from OUR header line, character for character (e.g. "record_01.pdf"),
+never "MED000001" or "MED000001.pdf" or similar.
+
+ALSO DO NOT construct "source_file" from the document's position/number in "### Document N —
+filename" — N is just this prompt's own running count of documents and has NO relationship to any
+number that may appear in the filename itself. Concrete example of the mistake to avoid: if a
+document is labeled "### Document 8 — record_01.pdf", the correct source_file is "record_01.pdf" —
+NOT "record_08.pdf", even though that looks like a plausible filename pattern. Copy the filename
+text itself; never compute or guess a filename from N.
+
+And "quote" must be text COPIED EXACTLY,
+character-for-character, from that file's body — not a paraphrase, not a summary. This exact quote is
+used to automatically locate and highlight the supporting passage in the original PDF for a human
 reviewer, so it must be verbatim and the file must be real. Keep quotes short (under ~25 words) and
 choose the specific sentence or phrase that most directly supports the finding.
 
@@ -76,6 +92,43 @@ symptom described as present "for years" before the visit in question), say so e
 entry's "text" — e.g. "Pre-existing: patient has a documented 3-year history of X" rather than
 folding it in indistinguishably with new findings. Do not guess whether something is pre-existing if
 the record doesn't say — only make this distinction when the source is explicit about timing.
+
+TIMELINE ENTRY DESCRIPTIONS — WRITE A REAL NARRATIVE, NOT A ONE-LINE LABEL
+A timeline entry's "text" is NOT a one-line summary or a bare category label (e.g. "Lab Report —
+ear culture, negative" is NOT acceptable) — it's a real narrative paragraph capturing everything
+clinically relevant that document states about that encounter, the way an experienced nurse
+paralegal would write it. For a visit/encounter note specifically, include whichever of the
+following the document actually states:
+- Chief complaint / reason for the visit, including how long the problem has been present.
+- Relevant history obtained, including care already sought elsewhere (e.g. a prior urgent care or ER
+  visit, what was done there, and whether it helped).
+- Pertinent review-of-systems findings.
+- Physical exam findings — especially abnormal ones, worded close to how the document states them.
+- Any procedure performed during this encounter.
+- Assessment/plan, and any medication prescribed (name, dose, frequency, duration if stated).
+Do not compress this into a single clause just to keep it short — a thorough multi-sentence
+paragraph is the correct length when the source document supports one. This applies to
+"detailed"/"standard" runs especially; even at "brief," a genuinely significant visit still needs
+enough of the above to be useful to an attorney who never reads the underlying document.
+
+Worked example — a real visit note (names fictional) might state a chief complaint, care sought
+elsewhere, review of systems, exam findings, a procedure, a plan, and a prescription. The correct
+"text" captures ALL of that as one narrative, e.g.:
+"Presents for left ear pain x3 weeks, previously seen at urgent care and by PCP who noted a
+suspected ruptured eardrum; given antibiotics and Tylenol with no relief. Also went to the ER, told
+left eardrum was ruptured, advised to keep it dry, given Tylenol. Reports decreased appetite and
+weight loss. Exam: left ear tenderness, purulent drainage, edema, and cerumen. Cerumen removed from
+left ear under microscopy; culture obtained and sent to microbiology. Plan: dry ear precautions,
+avoid Q-tip use, Ciprodex to left ear, follow up culture result, continue right hearing aid only,
+follow-up in 1 week. Prescribed Ciprodex Otic Suspension 0.3-0.1%, 4 drops to left ear twice daily
+for 7 days."
+IMPORTANT — this richness applies ONLY to "text", never to "quote": "quote" is a completely separate
+field with its own, opposite rule — stay short (under ~25 words) and verbatim, one supporting
+sentence or phrase, exactly as stated elsewhere in this prompt. Do not let "text" being long talk you
+into also writing a long, multi-sentence "quote" — a rich "text" paired with one short exact "quote"
+is correct; a long "quote" is not, even if it would technically also be verbatim.
+NOT acceptable for the same note: "Lab Report — ear culture, negative" (drops nearly everything
+clinically relevant in the document down to one incidental lab result).
 
 RECORD TYPE AND AUTHORING PROVIDER — LABEL EVERY ENTRY
 Every timeline/medications/procedures/diagnoses/labs entry needs two more fields:
@@ -182,23 +235,46 @@ examples from.
 
 PATIENT DEMOGRAPHICS AND HISTORY — FILL IN WHATEVER IS STATED, ONCE, FOR THE WHOLE CASE
 Separately from the entry lists above, also extract a single "patient_demographics" object covering
-whatever the documents state about the patient overall (not per-entry): date of birth, address,
-social history, past medical history, family history, surgical history, and primary care provider.
+whatever the documents state about the patient overall (not per-entry): date of birth, address, and
+the four history fields below, plus primary care provider.
+
+The four history fields will almost never appear under a clean, literal heading — you have to
+actively read through the records and piece each one together from wherever it's mentioned, not just
+look for a section literally titled that way. Don't limit yourself to a note's own "PMH:"/"SH:"/"FH:"
+subsection if one happens to exist — a passing mention anywhere (an assessment note, an HPI
+paragraph, a nursing intake form) counts just as much:
+- "social_history": smoking/alcohol/drug use, occupation, living situation, marital/relationship
+  status — anything the records say about how the patient lives, not just work history.
+- "past_medical_history": pre-existing diagnosed conditions the patient already had BEFORE this
+  episode of care (e.g. "history of hypertension," "known diabetic") — distinct from diagnoses made
+  DURING this episode, which belong in the "diagnoses" list above instead, not here.
+- "family_history": relevant medical conditions of the patient's family members (e.g. "mother had
+  breast cancer," "family history of cardiac disease") — only include this if a document actually
+  mentions a family member's condition specifically, not general risk-factor discussion.
+- "surgical_history": past surgeries/procedures the patient had BEFORE this episode of care — again
+  distinct from a procedure performed DURING this episode, which belongs in "procedures" above.
+
 Same omit-rather-than-guess rule as everywhere else — write "not stated" for anything the documents
-don't actually give.
+truly never mention, rather than inferring it from context that isn't actually there.
 
 RECORD SOURCE LABELS — ONE SHORT, CONTENT-BASED NAME PER DOCUMENT
 Separately, also produce a "record_sources" list with exactly one entry per document listed in
-DOCUMENTS above (match "source_file" to each document's exact given filename). For each, invent a
-short, human-readable "label" based on what the document actually IS, not its filename — e.g. an
-operative report from a facility called Fairview should get a label like "FairviewOpReport", not
-"record_1" or a copy of the filename. Guidelines:
-- As short as possible while still being clear — 1-3 words squashed together (no spaces), roughly
-  the style "FacilityRecordType" or just "RecordType" if no facility name is stated.
-- Base it on facility/provider name (if stated) plus record type (progress note, discharge summary,
-  operative report, ER note, etc.) — whatever actually distinguishes this document from the others.
-- Try to make it unique among this case's documents yourself, but don't worry about getting this
-  perfect — exact uniqueness is enforced separately afterward regardless of what you write here.
+DOCUMENTS above (match "source_file" to each document's exact given filename). For each:
+- "label": a short, human-readable abbreviation based on what the document actually IS, not its
+  filename — e.g. an operative report from a facility called Fairview should get a label like
+  "Fairview Op", not "record_1" or a copy of the filename. MAXIMUM TWO WORDS, separated by one
+  space — e.g. "Fairview Op", "Ear Cx", "ENT" (one word is fine when that's already enough). Base it
+  on facility/provider name (if stated) plus record type (progress note, discharge summary,
+  operative report, ER note, lab/culture name, etc.) — whatever actually distinguishes this document
+  from the others. Try to make it unique yourself, but don't worry about getting this perfect —
+  exact uniqueness is enforced separately afterward regardless of what you write here.
+- "facility": the facility/practice/provider name this document is from, if stated (e.g. "Beaumont",
+  "Southeast Michigan Ear, Nose, and Throat") — "not stated" if the document never names one.
+- "description": what kind of record this is, in a few words (e.g. "Canton CT Temporal Report",
+  "Ear Culture") — this can overlap with "label" in content, just written out more fully rather than
+  abbreviated.
+- "date": this document's own date (e.g. date of service) if stated — same format rules as every
+  other date field in this task (write "not stated" if genuinely absent, never guess).
 
 Respond with ONLY a JSON object matching this shape (no other text). Fill out "medications",
 "procedures", "diagnoses", and "labs" completely for every document before writing "potential_issues",
@@ -206,7 +282,7 @@ Respond with ONLY a JSON object matching this shape (no other text). Fill out "m
 that reason:
 {{
   "timeline": [
-    {{"date": "...", "text": "what happened, 1-2 sentences", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "full narrative of the encounter, see TIMELINE ENTRY DESCRIPTIONS above — not a one-line label", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "medications": [
     {{"date": "...", "text": "medication name + dose if stated", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
@@ -231,7 +307,7 @@ that reason:
     "family_history": "...", "surgical_history": "...", "pcp": "..."
   }},
   "record_sources": [
-    {{"source_file": "exact filename", "label": "ShortContentBasedLabel"}}
+    {{"source_file": "exact filename", "label": "Two Words Max", "facility": "...", "description": "...", "date": "..."}}
   ],
   "summary": "short plain-language summary of what happened overall"
 }}

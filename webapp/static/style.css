@@ -631,6 +631,18 @@ button:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
   font-size: 0.92rem;
   line-height: 1.6;
 }
+.preview-doc-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
 .preview-doc h2 {
   font-family: var(--font-serif);
   font-size: 1.15rem;
@@ -651,6 +663,32 @@ button:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
 .preview-list { margin: 0.3rem 0; padding-left: 1.4rem; }
 .preview-citation { font-size: 0.8rem; font-style: italic; color: var(--muted); margin-top: 0.15rem; }
 .preview-footer { font-size: 0.78rem; font-style: italic; color: var(--muted); margin-top: 1.2rem; }
+
+/* Click-to-edit case-content values (see editableValue/startEditingPreviewValue in app.js) — a
+   subtle affordance so it's discoverable without cluttering the static, template-like look. */
+.editable-value {
+  cursor: text;
+  border-radius: 4px;
+  padding: 0 0.15rem;
+  margin: 0 -0.15rem;
+  white-space: pre-line; /* a saved newline (Shift+Enter) must actually show as a line break, not
+                             collapse to a space the way plain HTML text normally would */
+}
+.editable-value:hover {
+  background: var(--finding-hover-bg);
+  outline: 1px dashed var(--border);
+}
+.editable-value-input {
+  width: 100%;
+  min-height: 1.6em;
+  font: inherit;
+  color: inherit;
+  background: var(--card-bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.15rem 0.3rem;
+  resize: vertical;
+}
 
 .preview-table {
   width: 100%;

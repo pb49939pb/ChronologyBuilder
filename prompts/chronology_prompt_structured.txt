@@ -111,40 +111,49 @@ paragraph is the correct length when the source document supports one. This appl
 "detailed"/"standard" runs especially; even at "brief," a genuinely significant visit still needs
 enough of the above to be useful to an attorney who never reads the underlying document.
 
-Worked example — a real visit note (names fictional) might state a chief complaint, care sought
-elsewhere, review of systems, exam findings, a procedure, a plan, and a prescription. The correct
-"text" captures ALL of that as one narrative, e.g.:
-"Presents for left ear pain x3 weeks, previously seen at urgent care and by PCP who noted a
-suspected ruptured eardrum; given antibiotics and Tylenol with no relief. Also went to the ER, told
-left eardrum was ruptured, advised to keep it dry, given Tylenol. Reports decreased appetite and
-weight loss. Exam: left ear tenderness, purulent drainage, edema, and cerumen. Cerumen removed from
-left ear under microscopy; culture obtained and sent to microbiology. Plan: dry ear precautions,
-avoid Q-tip use, Ciprodex to left ear, follow up culture result, continue right hearing aid only,
-follow-up in 1 week. Prescribed Ciprodex Otic Suspension 0.3-0.1%, 4 drops to left ear twice daily
-for 7 days."
+Worked example — this shows the SHAPE a rich "text" narrative should take, not real content. It is
+a schematic pattern, not a document to imitate the wording of: a genuinely thorough "text" for a
+visit/encounter weaves together whichever of chief complaint, prior care sought elsewhere (and
+whether it helped), pertinent review-of-systems findings, physical exam findings, any procedure
+performed, and assessment/plan/medication (name, dose, frequency, duration) the SOURCE DOCUMENT
+itself actually states — into one narrative paragraph, the way an experienced nurse paralegal would
+write it, e.g. in the shape of: "Presents for [complaint] x[duration], previously seen at [prior
+care setting] who [prior finding/treatment, and whether it helped]. ROS: [pertinent positives/
+negatives]. Exam: [abnormal findings]. [Procedure performed, if any]. Plan: [plan details].
+Prescribed [medication, dose, frequency, duration]." Every bracketed piece must come from THIS
+document alone — never invent, and never reuse wording, symptoms, findings, or a medication name
+from this instruction itself; a document about an unrelated complaint (e.g. a sore throat) must
+never produce a narrative describing ear pain, Ciprodex, or any other detail that isn't actually
+present in what you were given to read.
+NOT acceptable for the same note: "Lab Report — ear culture, negative" (drops nearly everything
+clinically relevant in the document down to one incidental lab result) — that specific phrase is
+itself just an illustration of "too terse," not a real finding either.
 IMPORTANT — this richness applies ONLY to "text", never to "quote": "quote" is a completely separate
 field with its own, opposite rule — stay short (under ~25 words) and verbatim, one supporting
 sentence or phrase, exactly as stated elsewhere in this prompt. Do not let "text" being long talk you
 into also writing a long, multi-sentence "quote" — a rich "text" paired with one short exact "quote"
 is correct; a long "quote" is not, even if it would technically also be verbatim.
-NOT acceptable for the same note: "Lab Report — ear culture, negative" (drops nearly everything
-clinically relevant in the document down to one incidental lab result).
 
 RECORD TYPE AND AUTHORING PROVIDER — LABEL EVERY ENTRY
-Every timeline/medications/procedures/diagnoses/labs entry needs two more fields:
+Every timeline/visits/medications/procedures/diagnoses/labs entry needs two more fields:
 - "record_type": the kind of note or document this fact came from, in the source's own terms —
   e.g. "Nursing Note", "Progress Note", "Clinical Note", "Radiology Report", "Discharge Summary",
-  "Operative Report", "Pathology Report", "Lab Report". Use "not stated" only if the document truly
-  gives no indication of what kind of record it is.
-- "author": the name of the provider who authored/signed the note, if the document states one. Use
-  "not stated" if no author is given — never guess a name from context.
+  "Operative Report", "Pathology Report", "Lab Report", "Physical Therapy Note". Use "not stated"
+  only if the document truly gives no indication of what kind of record it is.
+- "author": the name of the provider who authored/signed the note, INCLUDING their credential or
+  role if the document states one — e.g. "Dr. Jane Doe, MD", "John Smith, PT", "Susan Lee, DO",
+  "Maria Gomez, NP". This matters a lot for visits specifically: a case can have visits with several
+  different kinds of providers (physicians, physical therapists, nurse practitioners, etc.), and the
+  credential is what lets a reader tell them apart at a glance — don't just write the name and drop
+  the credential even if it seems obvious from the record_type. Use "not stated" if no author is
+  given at all — never guess a name or credential from context.
 For a Radiology Report, Pathology Report, or a critical/significant lab result specifically, also
 name the ordering and reading/interpreting provider (if stated) directly within "text" — e.g.
 "MRI lumbar spine, ordered by Dr. A, read by Dr. B: ..." — rather than leaving it out. This matters
 especially when either provider is one of the defendant(s) named in the case context above.
 
 AT-ISSUE — FLAG EVERY MENTION OF THE DEFENDANT, EVEN A MINOR ONE
-Every timeline/medications/procedures/diagnoses/labs entry also needs an "at_issue" boolean field:
+Every timeline/visits/medications/procedures/diagnoses/labs entry also needs an "at_issue" boolean field:
 true if the entry involves, names, or was authored/ordered/read by one of the defendant(s) named in
 the case context above; false otherwise. A defendant's name appearing ANYWHERE in an entry's source
 material counts as at_issue — even if it seems like a minor or routine mention, since it can later
@@ -204,6 +213,22 @@ text that follows it.
 
 DOCUMENTS:
 {records}
+
+VISITS — A SAFETY-NET LIST OF EVERY OFFICE VISIT/PATIENT ENCOUNTER, NO EXCEPTIONS
+Separately from the timeline above, also produce a "visits" list with one entry per distinct office
+visit, appointment, or patient encounter described in ANY document — a progress note, an office
+visit note, a physical therapy session, a specialist consult, an ER visit, anything where a provider
+actually saw or evaluated the patient. This is a real, observed gap this list exists specifically to
+catch: on a real large case, structured single-fact content (lab values, radiology results) got
+reliably extracted while entire visit narratives were missed. Treat this list as EQUALLY IMPORTANT
+as the timeline, not an afterthought — go back through every document and check whether it
+describes a visit, even if you already covered it in the timeline above; it's fine and expected for
+the same visit to appear in both places.
+Each "visits" entry gets the exact same full-narrative "text" as described under TIMELINE ENTRY
+DESCRIPTIONS above — chief complaint, relevant history (including care sought elsewhere), review of
+systems, exam findings, procedures performed, assessment/plan, and any prescription — never
+compressed to a one-line label. Be exhaustive: if a case has 12 visit notes across several
+providers, this list should have 12 entries, not 3.
 
 ALSO EXTRACT FOUR ATOMIC FACT LISTS (medications, procedures, diagnoses, labs)
 Separately from the narrative timeline above, pull out short, atomic facts into four flat lists —
@@ -270,9 +295,14 @@ DOCUMENTS above (match "source_file" to each document's exact given filename). F
   exact uniqueness is enforced separately afterward regardless of what you write here.
 - "facility": the facility/practice/provider name this document is from, if stated (e.g. "Beaumont",
   "Southeast Michigan Ear, Nose, and Throat") — "not stated" if the document never names one.
+  MANDATORY CONSISTENCY CHECK: if you used a facility/provider name when writing "label" above (most
+  labels do), that exact same name MUST also appear here — do not write a facility name into "label"
+  and then leave this field "not stated". These two fields describing the same document should never
+  disagree about whether a facility name exists.
 - "description": what kind of record this is, in a few words (e.g. "Canton CT Temporal Report",
   "Ear Culture") — this can overlap with "label" in content, just written out more fully rather than
-  abbreviated.
+  abbreviated. Same consistency rule: if "label" reflects a record type (progress note, operative
+  report, etc.), write that same record type out more fully here rather than leaving it blank.
 - "date": this document's own date (e.g. date of service) if stated — same format rules as every
   other date field in this task (write "not stated" if genuinely absent, never guess).
 
@@ -283,6 +313,9 @@ that reason:
 {{
   "timeline": [
     {{"date": "...", "text": "full narrative of the encounter, see TIMELINE ENTRY DESCRIPTIONS above — not a one-line label", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+  ],
+  "visits": [
+    {{"date": "...", "text": "full narrative of this visit, see VISITS above — one entry per visit, be exhaustive", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "provider name, WITH credential e.g. 'Dr. Jane Doe, MD' or 'John Smith, PT'", "at_issue": false}}
   ],
   "medications": [
     {{"date": "...", "text": "medication name + dose if stated", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}

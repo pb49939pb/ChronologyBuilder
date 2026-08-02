@@ -45,6 +45,10 @@ const previewChronologyBtn = document.getElementById("preview-chronology-btn");
 const chronologyPreviewEl = document.getElementById("chronology-preview");
 const chronologyPreviewModal = document.getElementById("chronology-preview-modal");
 const chronologyPreviewClose = document.getElementById("chronology-preview-close");
+const filesAnalyzedBtn = document.getElementById("files-analyzed-btn");
+const filesAnalyzedModal = document.getElementById("files-analyzed-modal");
+const filesAnalyzedClose = document.getElementById("files-analyzed-close");
+const filesAnalyzedListEl = document.getElementById("files-analyzed-list");
 const exportConfirmModal = document.getElementById("export-confirm-modal");
 const exportConfirmMessage = document.getElementById("export-confirm-message");
 const exportConfirmCancel = document.getElementById("export-confirm-cancel");
@@ -58,6 +62,7 @@ const exportConfirmProceed = document.getElementById("export-confirm-proceed");
 // `const` declared further down the file is in the temporal dead zone until execution reaches it,
 // so referencing it from a function invoked this early would throw.
 const FACTS_CATEGORIES = [
+  { key: "visits", label: "Visits" },
   { key: "medications", label: "Medications" },
   { key: "procedures", label: "Procedures" },
   { key: "diagnoses", label: "Diagnoses" },
@@ -91,6 +96,9 @@ let currentRecordSourceLabels = {};
 // filename -> page count, computed server-side (never model-derived — see page_counts in app.py's
 // _generate_chronology) — feeds the Abbreviations/Record Sources legend's "N page(s)".
 let currentPageCounts = {};
+// Every source file this case actually ingested and read (see source_filenames in app.py) — powers
+// the "Files Analyzed" audit-trail modal, Case Mode only (single-upload sessions don't set this).
+let currentSourceFilenames = [];
 
 // Review state — kept in the browser only (sessionStorage), not sent to the server.
 // findingsById: id -> { section, text, date, sourceFile, quote, sourceFiles, quotes }
@@ -339,7 +347,7 @@ if (caseJobId && caseGroupKey) {
 
   const countFindings = (findings) => {
     if (!findings) return 0;
-    return ["timeline", "medications", "procedures", "diagnoses", "labs", "potential_issues", "discrepancies"]
+    return ["timeline", "visits", "medications", "procedures", "diagnoses", "labs", "potential_issues", "discrepancies"]
       .reduce((sum, key) => sum + (findings[key] ? findings[key].length : 0), 0);
   };
 
@@ -587,6 +595,10 @@ function renderResults(data, { fromCache = false } = {}) {
   currentCaseMeta = data.case || null;
   currentRecordSourceLabels = data.record_source_labels || {};
   currentPageCounts = data.page_counts || {};
+  // Case Mode's /results nests this under "case" (see case_group_results in app.py); single-upload
+  // mode's SSE "done" event has it at the top level instead — check both shapes.
+  currentSourceFilenames = data.source_filenames || (data.case && data.case.source_filenames) || [];
+  filesAnalyzedBtn.style.display = currentSourceFilenames.length ? "inline-block" : "none";
 
   // A batch result being shown while still generating (see the polling loop below) legitimately
   // has no final stats yet — they're only computed once every chunk finishes — so this must not
@@ -709,6 +721,11 @@ function renderFindings(findings, savedEdits = {}) {
   section("timeline", "Timeline", sortedTimeline, (item) => ({
     text: item.text, date: item.date, sourceFile: item.source_file, quote: item.quote,
     recordType: item.record_type, author: item.author, atIssue: item.at_issue, bates: item.bates,
+    // Real page number within its own source document — always present when the quote was located
+    // at all, independent of whether that page happens to be Bates-stamped. Used as the PAGE
+    // column's fallback (see citationText/buildExportPayload) when a document simply isn't
+    // Bates-stamped, rather than showing nothing.
+    pageNumber: item.page_number,
     // Present only when this entry was merged from literal duplicate source documents saying the
     // same thing (see _dedupe_with_multi_source in app.py) — the row then shows every source it
     // was corroborated by instead of just the first one, same rendering already used for
@@ -718,6 +735,7 @@ function renderFindings(findings, savedEdits = {}) {
 
   section("potential_issues", "Potential Issues", findings.potential_issues, (item) => ({
     text: item.text, date: null, sourceFile: item.source_file, quote: item.quote, bates: item.bates,
+    pageNumber: item.page_number,
     sourceFiles: item.source_files, batesList: item.bates_list,
   }));
 
@@ -726,6 +744,7 @@ function renderFindings(findings, savedEdits = {}) {
     sourceFile: (item.source_files || []).join(", "),
     quote: (item.quotes || [])[0],
     sourceFiles: item.source_files, quotes: item.quotes, batesList: item.bates_list,
+    pageNumberList: item.page_number_list,
   }));
 
   // Facts pulled in via the Key Facts panel (clicked because they weren't already covered above) —
@@ -737,6 +756,7 @@ function renderFindings(findings, savedEdits = {}) {
   section("key_facts", "Key Facts (added)", sortedAddedFacts, (item) => ({
     text: item.text, date: item.date, sourceFile: item.sourceFile, quote: item.quote,
     recordType: item.recordType, author: item.author, atIssue: item.atIssue, bates: item.bates,
+    pageNumber: item.pageNumber,
     sourceFiles: item.sourceFiles, batesList: item.batesList,
   }), (item) => `key_facts-${item.id}`);
 
@@ -867,6 +887,7 @@ function onFactChipClick(item, existingId, isRemovable) {
   const newFact = {
     id: nextFactId, text: item.text, date: item.date, sourceFile: item.source_file, quote: item.quote,
     recordType: item.record_type, author: item.author, atIssue: item.at_issue, bates: item.bates,
+    pageNumber: item.page_number,
     sourceFiles: item.source_files, batesList: item.bates_list,
   };
   addedFacts.push(newFact);
@@ -920,9 +941,14 @@ function recordSourceLabel(sourceFile) {
 // PDF's own numbering). `bates` is computed server-side and travels with the finding from the
 // moment results are rendered, not just once a reviewer happens to open the source — see
 // _resolve_bates in app.py.
-function citationText(sourceFile, bates) {
+function citationText(sourceFile, bates, pageNumber) {
   const label = recordSourceLabel(sourceFile);
-  return bates ? `${label} (Bates ${bates})` : `${label} (Bates not resolved)`;
+  if (bates) return `${label} (Bates ${bates})`;
+  // No genuine Bates stamp on this page (not every real document is Bates-stamped) — the document's
+  // own page number is a real, resolved fallback, not a guess: it's only ever set when the quote was
+  // actually located on that page (see page_number in app.py's _find_citation_for_quote).
+  if (pageNumber) return `${label} (p. ${pageNumber})`;
+  return `${label} (Bates not resolved)`;
 }
 
 function statusIcon(status) {
@@ -1016,10 +1042,11 @@ function makeFindingEl(id, meta) {
   if (meta.sourceFiles && meta.sourceFiles.length) {
     // Discrepancies cite multiple sources at once.
     const batesList = meta.batesList || [];
-    const parts = meta.sourceFiles.map((sf, i) => citationText(sf, batesList[i]));
+    const pageNumberList = meta.pageNumberList || [];
+    const parts = meta.sourceFiles.map((sf, i) => citationText(sf, batesList[i], pageNumberList[i]));
     sourceSpan.textContent = parts.length ? `Sources: ${parts.join("; ")}` : "";
   } else {
-    sourceSpan.textContent = sourceFile ? `Source: ${citationText(sourceFile, meta.bates)}` : "";
+    sourceSpan.textContent = sourceFile ? `Source: ${citationText(sourceFile, meta.bates, meta.pageNumber)}` : "";
   }
   if (!quote) sourceSpan.classList.add("finding-no-quote");
   body.appendChild(sourceSpan);
@@ -1399,17 +1426,19 @@ function buildExportPayload() {
   const approved = orderedFindingIds.filter((id) => findingStatus[id] === "approved").length;
   const rejected = orderedFindingIds.filter((id) => findingStatus[id] === "rejected").length;
 
-  // Citation is always the Bates number, never a plain page index — see citationText(). Multi-
-  // source items (discrepancies) join each source's own citation together.
+  // Citation prefers the Bates number, falling back to the document's own page number when that
+  // specific page simply isn't Bates-stamped — see citationText(). Multi-source items
+  // (discrepancies) join each source's own citation together.
   const cite = (f) => {
     if (f.sourceFiles && f.sourceFiles.length) {
       const batesList = f.batesList || [];
-      return f.sourceFiles.map((sf, i) => citationText(sf, batesList[i])).join("; ");
+      const pageNumberList = f.pageNumberList || [];
+      return f.sourceFiles.map((sf, i) => citationText(sf, batesList[i], pageNumberList[i])).join("; ");
     }
-    return citationText(f.sourceFile, f.bates);
+    return citationText(f.sourceFile, f.bates, f.pageNumber);
   };
 
-  // The template's DATE | PAGE | RECORD | SOURCE | DESCRIPTION table — built from the timeline
+  // The template's DATE | PAGE | RECORD SOURCE | DESCRIPTION table — built from the timeline
   // and any manually-added Key Facts, the only two sections shaped like an actual chronology row
   // (a real per-entry date/page/record type/author, not just a citation). Merge-sorted by parsed
   // date — earliest first — rather than left in approval order: the two sections were each already
@@ -1417,21 +1446,24 @@ function buildExportPayload() {
   // simply concatenating them would still show every Key Fact after every Timeline entry regardless
   // of actual date, which isn't a true chronological order for a table that's presented as one
   // unified sequence. Unparseable/placeholder dates sort to the end, same as on screen.
-  // "page" is the Bates number, not a page index — per the firm's citation convention, this IS what
-  // belongs in the template's PAGE column. An entry merged from literal duplicate source documents
-  // (see _dedupe_with_multi_source in app.py) has sourceFiles/batesList instead of a single source —
-  // show every one, joined, so the export doesn't silently hide that this fact was corroborated by
-  // more than one record.
+  // "page" prefers the Bates number (per the firm's citation convention) and falls back to the
+  // document's own page number when that page isn't Bates-stamped, rather than showing nothing.
+  // An entry merged from literal duplicate source documents (see _dedupe_with_multi_source in
+  // app.py) has sourceFiles/batesList instead of a single source — show every one, joined, so the
+  // export doesn't silently hide that this fact was corroborated by more than one record.
   // Per-row overrides from the preview modal's click-to-edit (see savePreviewOverride) — applied on
   // top of the AI-extracted/resolved value, same override-wins-if-present pattern as the case-level
   // fields below. Keyed by finding id, not array position, so they survive reordering/re-sorting.
   const overrides = loadPreviewOverrides(currentSessionId);
+  const pageOrFallback = (bates, pageNumber) => bates || (pageNumber ? `p. ${pageNumber}` : null);
   const rows = [...bySection.timeline, ...bySection.key_facts]
     .map((f) => {
       const multiSource = f.sourceFiles && f.sourceFiles.length > 1;
       const date = overrides[`row:${f.id}:date`] ?? (f.date || null);
       const page = overrides[`row:${f.id}:page`] ??
-        (multiSource ? f.batesList.filter(Boolean).join(", ") || null : f.bates || null);
+        (multiSource
+          ? f.sourceFiles.map((sf, i) => pageOrFallback((f.batesList || [])[i], (f.pageNumberList || [])[i])).filter(Boolean).join(", ") || null
+          : pageOrFallback(f.bates, f.pageNumber));
       const source = overrides[`row:${f.id}:source`] ?? (multiSource
         ? f.sourceFiles.map((sf) => recordSourceLabel(sf)).join(", ")
         : recordSourceLabel(f.sourceFile) || null);
@@ -1611,7 +1643,7 @@ function renderChronologyPreviewHtml(payload) {
       <table class="preview-table">
         <colgroup>
           <col class="preview-col-narrow"><col class="preview-col-narrow">
-          <col class="preview-col-narrow">
+          <col class="preview-col-source">
           <col class="preview-col-desc">
         </colgroup>
         <thead><tr><th>DATE</th><th>PAGE</th><th>RECORD SOURCE</th><th>DESCRIPTION</th></tr></thead>
@@ -1715,6 +1747,66 @@ chronologyPreviewModal.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && chronologyPreviewModal.style.display !== "none") hideChronologyPreview();
+});
+
+// "Files Analyzed" — every source file this case actually ingested and read, so a reviewer can
+// confirm nothing was silently skipped. Deliberately checks EVERY category the model can populate
+// (not just approved/reviewable findings — a file that was read but produced literally nothing is
+// exactly the case worth flagging), unlike the Chronology Preview's referencedFiles, which only
+// cares about what made it into the approved output.
+function filesWithAnyFinding() {
+  const referenced = new Set();
+  const categories = [
+    "timeline", "visits", "medications", "procedures", "diagnoses", "labs", "potential_issues",
+  ];
+  categories.forEach((key) => {
+    (currentRawFindings?.[key] || []).forEach((item) => {
+      if (item.source_file) referenced.add(item.source_file);
+    });
+  });
+  (currentRawFindings?.discrepancies || []).forEach((item) => {
+    (item.source_files || []).forEach((sf) => referenced.add(sf));
+  });
+  return referenced;
+}
+
+function renderFilesAnalyzedList() {
+  const referenced = filesWithAnyFinding();
+  filesAnalyzedListEl.innerHTML = "";
+  currentSourceFilenames.forEach((filename) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "files-analyzed-row";
+    const hasFindings = referenced.has(filename);
+    row.innerHTML = `
+      <span class="files-analyzed-name">${escapeHtml(recordSourceLabel(filename))}
+        <span class="files-analyzed-filename">(${escapeHtml(filename)})</span></span>
+      ${hasFindings ? "" : '<span class="files-analyzed-flag">No findings extracted</span>'}
+    `;
+    row.addEventListener("click", () => {
+      hideFilesAnalyzed();
+      showFinding(filename, null, null);
+    });
+    filesAnalyzedListEl.appendChild(row);
+  });
+}
+
+function showFilesAnalyzed() {
+  renderFilesAnalyzedList();
+  filesAnalyzedModal.style.display = "flex";
+}
+
+function hideFilesAnalyzed() {
+  filesAnalyzedModal.style.display = "none";
+}
+
+filesAnalyzedBtn.addEventListener("click", showFilesAnalyzed);
+filesAnalyzedClose.addEventListener("click", hideFilesAnalyzed);
+filesAnalyzedModal.addEventListener("click", (e) => {
+  if (e.target === filesAnalyzedModal) hideFilesAnalyzed();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && filesAnalyzedModal.style.display !== "none") hideFilesAnalyzed();
 });
 
 function downloadBlob(blob, filename) {
@@ -1847,12 +1939,24 @@ async function showFinding(sourceFile, quote, findingId) {
   } catch (err) {
     console.error("showFinding error:", err);
     const message = String(err);
-    // A 404 fetching the PDF almost always means this is a stale cached result (sessionStorage
-    // restores the last analysis automatically on page load) whose session files were deleted by
-    // a *newer* upload since — only the most recent analysis's files are ever kept on disk (see
-    // webapp/README.md). Detect that specific case and say so plainly instead of surfacing a raw
-    // exception, and clear the stale cache so a refresh doesn't keep restoring a broken result.
-    if (/\b404\b/.test(message) || /unexpected server response/i.test(message)) {
+    const is404 = /\b404\b/.test(message) || /unexpected server response/i.test(message);
+    if (is404 && caseJobId && caseGroupKey) {
+      // Case Mode sessions are durable (BATCH_SESSIONS_DIR, never wiped by a later upload) — a 404
+      // here means this specific finding's source_file couldn't be resolved to a real document,
+      // not a stale/expired session. The old single-upload-only message below ("re-upload the
+      // zip") was actively wrong and confusing for Case Mode — a real bug found via user report,
+      // not a hypothetical: it told a Case Mode reviewer to re-upload a zip that was never
+      // uploaded in the first place.
+      viewerTitle.textContent = "Source document unavailable";
+      viewerHint.textContent =
+        "This finding's cited source document couldn't be matched to a real file in this case " +
+        "(the automatic source-matching wasn't able to resolve it). The finding's text and quote " +
+        "above are still shown — just its PDF link isn't available for this one entry.";
+    } else if (is404) {
+      // A 404 fetching the PDF in single-upload mode almost always means this is a stale cached
+      // result (sessionStorage restores the last analysis automatically on page load) whose
+      // session files were deleted by a *newer* upload since — only the most recent analysis's
+      // files are ever kept on disk for that mode (see webapp/README.md).
       viewerTitle.textContent = "This session has expired";
       viewerHint.textContent =
         "The source PDFs for this result are no longer on disk — only the most recent upload's " +

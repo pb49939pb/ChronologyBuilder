@@ -13,7 +13,13 @@ Factual allegation as stated there: {facts_summary}
 THE FULL MERGED TIMELINE FOR THIS CASE
 {timeline_text}
 
-YOUR TWO TASKS
+EVERY VISIT/ENCOUNTER NARRATIVE FOR THIS CASE (often where scattered history details live)
+{visits_text}
+
+DEMOGRAPHICS ALREADY FOUND (per-document extraction so far — fill in what's still missing below)
+{demographics_so_far}
+
+YOUR THREE TASKS
 
 1. "dol" — Determine the real Date of Loss for this case, grounded in the actual timeline above, not
    just the complaint's own (often vague) statement. This is frequently NOT a single clean date — real
@@ -33,8 +39,23 @@ YOUR TWO TASKS
    Still follow the same core rule as everywhere else: only state what the timeline above actually
    supports — do not introduce a fact, date, or clinical detail that isn't already in it.
 
+3. "patient_demographics" — the same seven fields shown under DEMOGRAPHICS ALREADY FOUND above
+   (dob, address, social_history, past_medical_history, family_history, surgical_history, pcp).
+   Copy forward any field that's already filled in there unchanged. For any field still "not
+   stated", look through the visit narratives above specifically — these are real full visit notes,
+   and these details are almost never under a clean labeled heading; they show up as passing
+   mentions (a social history aside in one visit's HPI, a family history comment in another's
+   assessment). You have the advantage here of seeing every visit at once instead of one document at
+   a time, so piece together a scattered mention if the underlying documents support it. Same
+   omit-rather-than-guess rule as everywhere else: leave a field "not stated" if it's genuinely never
+   mentioned anywhere above, rather than inferring it from unrelated context.
+
 Respond with ONLY a JSON object matching this shape (no other text):
 {{
   "dol": "...",
-  "summary": "..."
+  "summary": "...",
+  "patient_demographics": {{
+    "dob": "...", "address": "...", "social_history": "...", "past_medical_history": "...",
+    "family_history": "...", "surgical_history": "...", "pcp": "..."
+  }}
 }}

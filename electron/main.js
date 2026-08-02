@@ -450,11 +450,16 @@ function getBackendUrl() {
 // session) tries to make, except the app's own backend and GitHub's update-check/release-asset
 // hosts. Two real network paths exist OUTSIDE this hook's reach and can't be governed by it: (1)
 // Ollama's own subprocess, which makes its own HTTP calls to ollama.com during first-run model
-// pull — a separate Go binary, entirely outside Chromium's network stack; (2) possibly
-// electron-updater's checkForUpdates(), depending on whether its HTTP client issues requests
-// through Electron's session or Node's own https module directly — unverified either way, so the
-// GitHub hosts are listed defensively: harmless if the hook can't see that traffic, load-bearing
-// if it can. See TEST_RESULTS.md for the empirical check of which is actually true.
+// pull — a separate Go binary, entirely outside Chromium's network stack; (2) electron-updater
+// itself — confirmed by reading node_modules/electron-updater/out/electronHttpExecutor.js: its
+// HTTP client uses Electron's `net.request()`, but through `session.fromPartition("electron-updater",
+// ...)`, a completely separate session from `session.defaultSession` — so this hook genuinely never
+// sees that traffic at all, in either direction. The GitHub hosts listed below are therefore dead
+// weight with respect to electron-updater specifically (harmless, just not doing anything for it) —
+// kept anyway in case something else in this app ever does route a GitHub request through the
+// default session. The real, confirmed root cause of a reported "auto-update doesn't work" bug
+// turned out to be unrelated to this hook entirely: a manually-published Windows release missing
+// its required `latest.yml` metadata file — see DESKTOP_PACKAGING.md's "Critical" callout.
 function installNetworkAllowlist() {
   const allowedHosts = new Set([
     new URL(getBackendUrl()).host,

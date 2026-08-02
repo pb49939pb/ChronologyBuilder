@@ -36,7 +36,7 @@ import requests
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 from PIL import Image, ImageOps
 from flask import (
     Flask,
@@ -289,10 +289,39 @@ def _dated_entry_schema() -> dict:
     }
 
 
+def _demographics_schema() -> dict:
+    """Shared by RESPONSE_SCHEMA (per-chunk extraction) and CASE_SYNTHESIS_SCHEMA (the case-wide
+    fill-the-gaps pass) — same seven fields either way."""
+    return {
+        "type": "object",
+        "properties": {
+            "dob": {"type": "string"},
+            "address": {"type": "string"},
+            "social_history": {"type": "string"},
+            "past_medical_history": {"type": "string"},
+            "family_history": {"type": "string"},
+            "surgical_history": {"type": "string"},
+            "pcp": {"type": "string"},
+        },
+        "required": [
+            "dob", "address", "social_history", "past_medical_history",
+            "family_history", "surgical_history", "pcp",
+        ],
+    }
+
+
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
         "timeline": _dated_entry_schema(),
+        # A safety-net list of every distinct office visit/patient encounter, same full-narrative
+        # richness as timeline entries — added after a real-world case showed the model reliably
+        # extracting labs/radiology (simple, explicit, single-fact) while systematically missing
+        # whole visit-summary narratives (multi-part synthesis: chief complaint, exam, plan, etc.),
+        # the same "structured fact vs. synthesized narrative" gap the other Key Facts lists below
+        # already exist to catch for simpler facts. Powers its own "Visits" Key Facts tab so a
+        # reviewer can always find/add a visit that didn't make it into the main timeline.
+        "visits": _dated_entry_schema(),
         # Atomic, deduplicated facts pulled out separately from the narrative timeline — power the
         # "Key Facts" tabs in the UI, which let the reviewer quickly scan and one-click-add any of
         # these into the reviewed output even if the narrative timeline/summary didn't surface it.
@@ -332,23 +361,10 @@ RESPONSE_SCHEMA = {
         },
         # Case-wide (not per-entry) facts about the patient — stated once, not repeated per finding.
         # See patient_demographics merge handling in _merge_chunk_findings: first non-empty value
-        # per subfield wins across chunks, a documented simplification, not an adjudication.
-        "patient_demographics": {
-            "type": "object",
-            "properties": {
-                "dob": {"type": "string"},
-                "address": {"type": "string"},
-                "social_history": {"type": "string"},
-                "past_medical_history": {"type": "string"},
-                "family_history": {"type": "string"},
-                "surgical_history": {"type": "string"},
-                "pcp": {"type": "string"},
-            },
-            "required": [
-                "dob", "address", "social_history", "past_medical_history",
-                "family_history", "surgical_history", "pcp",
-            ],
-        },
+        # per subfield wins across chunks (a documented simplification), plus a later case-wide
+        # synthesis pass (_synthesize_case_summary) that fills in whatever's still missing after
+        # that merge, using visibility across every visit at once instead of one document at a time.
+        "patient_demographics": _demographics_schema(),
         # One short, content-derived abbreviation per source document (e.g. "Fairview Op" for an
         # operative report from Fairview) — used in the export/UI's RECORD SOURCE column instead of
         # the raw filename, since a real production's filenames aren't always meaningful. Uniqueness
@@ -374,7 +390,7 @@ RESPONSE_SCHEMA = {
         "summary": {"type": "string"},
     },
     "required": [
-        "timeline", "medications", "procedures", "diagnoses", "labs",
+        "timeline", "visits", "medications", "procedures", "diagnoses", "labs",
         "potential_issues", "discrepancies", "patient_demographics", "record_sources", "summary",
     ],
 }
@@ -397,8 +413,9 @@ CASE_SYNTHESIS_SCHEMA = {
     "properties": {
         "dol": {"type": "string"},
         "summary": {"type": "string"},
+        "patient_demographics": _demographics_schema(),
     },
-    "required": ["dol", "summary"],
+    "required": ["dol", "summary", "patient_demographics"],
 }
 
 PORT = int(os.environ.get("LAWFIRMAGENT_PORT", "5050"))
@@ -592,27 +609,42 @@ def _extract_complaint_info(pdf_path: Path) -> dict:
 
 
 def _synthesize_case_summary(
-    timeline: list, complaint_dol: str | None, facts_summary: str | None, case_context: str,
+    timeline: list, visits: list, demographics_so_far: dict,
+    complaint_dol: str | None, facts_summary: str | None, case_context: str,
 ) -> dict:
     """One schema-constrained Ollama call over the PRIMARY group's already-merged, deduped
-    timeline — not raw documents — run once chunking/merging is entirely done. This is what lets it
-    see the WHOLE case at once (each chunk's own model call, by contrast, only ever sees its own
-    slice): determining a real Date of Loss grounded in the actual timeline rather than just the
-    complaint's own (often vague/single-date) statement, and writing one coherent summary instead of
-    _merge_chunk_findings' `[Part 1]/[Part 2]` concatenation, which that function's own docstring
-    already documents as unable to notice a cross-chunk trend. Feasible regardless of case size
-    specifically because the input here is already-condensed extracted facts, not raw document text —
-    the same insight that motivated chunking in the first place. Raises on a request/JSON error, same
-    as _extract_complaint_info — the caller (_run_case_job/_run_case_rescan) decides how to degrade.
+    timeline/visits — not raw documents — run once chunking/merging is entirely done. This is what
+    lets it see the WHOLE case at once (each chunk's own model call, by contrast, only ever sees its
+    own slice): determining a real Date of Loss grounded in the actual timeline rather than just the
+    complaint's own (often vague/single-date) statement, writing one coherent summary instead of
+    _merge_chunk_findings' `[Part 1]/[Part 2]` concatenation (that function's own docstring already
+    documents as unable to notice a cross-chunk trend), and filling in demographics fields still
+    "not stated" after the per-chunk merge — a real, observed gap: scattered demographic mentions
+    (a social history aside in one visit, a family history comment in another) often don't get
+    picked up analyzing one document/chunk at a time, but are easier to piece together with every
+    visit narrative visible at once. Feasible regardless of case size specifically because the input
+    here is already-condensed extracted facts, not raw document text — the same insight that
+    motivated chunking in the first place. Raises on a request/JSON error, same as
+    _extract_complaint_info — the caller (_run_case_job/_run_case_rescan) decides how to degrade.
     """
-    timeline_text = "\n".join(
-        f"- {item.get('date') or 'not stated'}: {item.get('text') or ''}" for item in timeline
-    ) or "(no timeline entries)"
+    def entries_text(items: list) -> str:
+        return "\n".join(
+            f"- {item.get('date') or 'not stated'}: {item.get('text') or ''}" for item in items
+        ) or "(none)"
+
+    demographics_so_far = demographics_so_far or {}
+    demo_lines = "\n".join(
+        f"- {field}: {demographics_so_far.get(field) or 'not stated'}"
+        for field in ("dob", "address", "social_history", "past_medical_history",
+                       "family_history", "surgical_history", "pcp")
+    )
     prompt = CASE_SYNTHESIS_PROMPT_TEMPLATE.format(
         case_context=case_context or "(no case context available)",
         complaint_dol=complaint_dol or "not stated",
         facts_summary=facts_summary or "not stated",
-        timeline_text=timeline_text,
+        timeline_text=entries_text(timeline),
+        visits_text=entries_text(visits),
+        demographics_so_far=demo_lines,
     )
     payload = {
         "model": MODEL,
@@ -1007,7 +1039,7 @@ def pdf_to_text(pdf_path: Path) -> tuple[str, int, int]:
     num_ocr_pages = 0
     with pdfplumber.open(str(pdf_path)) as pdf:
         num_pages = len(pdf.pages)
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             text = _extract_page_text(page).strip()
             if len(text) < MIN_CHARS_PER_PAGE:
                 try:
@@ -1017,8 +1049,15 @@ def pdf_to_text(pdf_path: Path) -> tuple[str, int, int]:
                 if len(ocr_text) > len(text):
                     text = ocr_text
                     num_ocr_pages += 1
-            bates = _extract_bates_number(page) or "UNKNOWN"
-            pages_text.append(f"[BATES: {bates}]\n{text}")
+            # [PAGE N] is always present (gives every page a segment boundary + a real page number
+            # regardless of whether it's Bates-stamped); [BATES: X] is added ONLY when a real stamp
+            # is actually found — no fabricated placeholder. A page with no genuine Bates stamp used
+            # to get a literal "UNKNOWN" string embedded here, which then flowed through citation
+            # resolution as if it were a real Bates number — a real bug, not hypothetical, found
+            # while adding the page-number fallback this replaces it with.
+            bates = _extract_bates_number(page)
+            marker = f"[PAGE {page_num}]\n" + (f"[BATES: {bates}]\n" if bates else "")
+            pages_text.append(f"{marker}{text}")
     return "\n".join(pages_text), num_pages, num_ocr_pages
 
 
@@ -1218,6 +1257,21 @@ def export_docx():
     # chronology entries have been approved, rather than only appearing once there's data.
     table = doc.add_table(rows=1, cols=4)
     table.style = "Table Grid"
+    # Default Letter page, default 1" margins each side (never overridden above) => 6.5" usable width.
+    # DATE/PAGE/RECORD SOURCE combined ~1/3, DESCRIPTION ~2/3, RECORD SOURCE slightly wider than the
+    # other two of that first three — an explicit user requirement, not a stylistic default. Word
+    # ignores a plain table.columns[i].width for rows added later via add_row(), so every row's own
+    # cells must have their width set individually (see the loop below and inside the row-build loop).
+    table.autofit = False
+    _COL_WIDTHS = (Inches(0.65), Inches(0.65), Inches(0.85), Inches(4.35))
+
+    def _set_row_widths(cells):
+        for cell, width in zip(cells, _COL_WIDTHS):
+            cell.width = width
+
+    for col, width in zip(table.columns, _COL_WIDTHS):
+        col.width = width
+    _set_row_widths(table.rows[0].cells)
     for cell, text in zip(table.rows[0].cells, ("DATE", "PAGE", "RECORD SOURCE", "DESCRIPTION")):
         run = cell.paragraphs[0].add_run(text)
         run.bold = True
@@ -1227,6 +1281,7 @@ def export_docx():
         for r in rows:
             at_issue = bool(r.get("at_issue"))
             cells = table.add_row().cells
+            _set_row_widths(cells)
 
             def set_cell(cell, text, bold=False):
                 run = cell.paragraphs[0].add_run(text)
@@ -1407,7 +1462,7 @@ def _pack_into_chunks(records_parts: list, max_chars: int) -> list:
 
 
 _STREAMING_ARRAY_FIELDS = (
-    "timeline", "medications", "procedures", "diagnoses", "labs", "potential_issues", "discrepancies",
+    "timeline", "visits", "medications", "procedures", "diagnoses", "labs", "potential_issues", "discrepancies",
 )
 
 
@@ -1546,7 +1601,7 @@ def _call_model_for_chunk(records_text: str, detail_level: str, case_context: st
     return {"findings": findings, "wall_time": wall_time, "eval_count": eval_count, "eval_duration_s": eval_duration_s}
 
 
-_DATED_LIST_FIELDS = ("timeline", "medications", "procedures", "diagnoses", "labs")
+_DATED_LIST_FIELDS = ("timeline", "visits", "medications", "procedures", "diagnoses", "labs")
 
 # Every format actually seen coming out of real medical records/EHR exports so far — tried in
 # order, first match wins. Deliberately a fixed list rather than a lenient general-purpose parser
@@ -1604,18 +1659,86 @@ def _looks_degenerate(findings: dict) -> bool:
     return not any(findings.get(key) for key in _DATED_LIST_FIELDS) and not (findings.get("summary") or "").strip()
 
 
-_BATES_MARKER_PATTERN = re.compile(r"\[BATES: ([^\]]+)\]\n")
+# Matches the per-page marker pdf_to_text always embeds — group 1 is the page number (always
+# present), group 2 is the Bates number (only present/captured when that page is actually stamped).
+_PAGE_MARKER_PATTERN = re.compile(r"\[PAGE (\d+)\]\n(?:\[BATES: ([^\]]+)\]\n)?")
 
 
-def _find_bates_for_quote(doc_text: str | None, quote: str | None) -> str | None:
-    """Given a document's full extracted text (with `[BATES: X]` markers embedded once per page —
-    see pdf_to_text) and a quote the model claims came from this document, finds which page-segment
-    actually contains that quote and returns its Bates number.
+def _normalize_quote_text(s: str) -> str:
+    """Shared by _find_citation_for_quote and _reconcile_source_files — normalizes the same two
+    real, observed variant classes (smart quotes/dashes, collapsed whitespace) so a quote match
+    isn't defeated by a cosmetic difference between the model's reproduction and the source text."""
+    for orig, repl in (("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
+                       ("–", "-"), ("—", "-")):
+        s = s.replace(orig, repl)
+    return re.sub(r"\s+", " ", s.strip())
 
-    Deliberately NOT a schema field the model reports itself — the Bates number is derived
-    server-side from the quote the model already has to provide (verbatim, strictly grounded), the
-    same way highlight positions are independently verified rather than trusted to the model's own
-    claim elsewhere in this app. This also sidesteps a real, measured risk: adding another required
+
+def _reconcile_source_files(findings: dict, filename_to_text: dict) -> None:
+    """Corrects a finding's source_file when it doesn't match any real ingested document — a real,
+    observed failure mode on larger real-world cases (confirmed via user report: a click sometimes
+    rendered a real but WRONG PDF, or 404'd entirely): the model occasionally cites the wrong
+    filename, a genuinely different real file rather than just a punctuation/case variant
+    _find_closest_pdf already tolerates client-side for PDF serving. Recovery, in this order, never
+    guessing if neither works:
+    1. The finding's own quote is required to be verbatim (enforced elsewhere in the prompt) — if
+       that exact quote is found in exactly one OTHER real document's text, that document is
+       unambiguously the true source regardless of what filename the model wrote down. Ambiguous
+       (found in 0 or 2+ documents) is left alone rather than guessed.
+    2. Otherwise, fall back to the same fuzzy filename normalization _find_closest_pdf already uses
+       (case/punctuation/whitespace-insensitive) — catches a near-miss reproduction of a real name.
+    If neither recovers a real match, source_file is left exactly as the model wrote it — downstream
+    (bates resolution, PDF serving, the Record Sources legend) already treat an unresolvable
+    source_file as an honest "can't verify this citation" rather than silently guessing, and this
+    function must not undermine that by forcing a match where none is truly warranted. Must run
+    BEFORE _resolve_bates/_resolve_record_sources so every later consumer sees the corrected name.
+    """
+    def reconcile_one(src: str | None, quote: str | None) -> str | None:
+        if not src or src in filename_to_text:
+            return src
+        if quote:
+            norm_quote = _normalize_quote_text(quote)
+            if norm_quote:
+                matches = [
+                    fname for fname, text in filename_to_text.items()
+                    if norm_quote in _normalize_quote_text(text)
+                ]
+                if len(matches) == 1:
+                    return matches[0]
+        normalized_src = _normalize_filename(src)
+        if normalized_src:
+            for fname in filename_to_text:
+                if _normalize_filename(fname) == normalized_src:
+                    return fname
+        return src
+
+    for key in _DATED_LIST_FIELDS + ("potential_issues",):
+        for item in findings.get(key, []) or []:
+            item["source_file"] = reconcile_one(item.get("source_file"), item.get("quote"))
+    for item in findings.get("discrepancies", []) or []:
+        source_files = item.get("source_files") or []
+        quotes = item.get("quotes") or []
+        item["source_files"] = [
+            reconcile_one(src, quotes[i] if i < len(quotes) else None)
+            for i, src in enumerate(source_files)
+        ]
+
+
+def _find_citation_for_quote(doc_text: str | None, quote: str | None) -> tuple[str | None, int | None]:
+    """Given a document's full extracted text (with a `[PAGE N]` marker — and, when the page is
+    actually Bates-stamped, a following `[BATES: X]` marker — embedded once per page, see
+    pdf_to_text) and a quote the model claims came from this document, finds which page actually
+    contains that quote and returns `(bates, page_number)`. `bates` is None whenever that specific
+    page has no genuine Bates stamp (never a fabricated placeholder — a real, previously-existing
+    bug: pages with no stamp used to get a literal "UNKNOWN" string that flowed through as if it
+    were real); `page_number` is the 1-indexed page within THIS document, always present when the
+    quote is found at all, and exists specifically so the caller has a real fallback citation when
+    a document simply isn't Bates-stamped, rather than nothing at all.
+
+    Deliberately NOT a schema field the model reports itself — both values are derived server-side
+    from the quote the model already has to provide (verbatim, strictly grounded), the same way
+    highlight positions are independently verified rather than trusted to the model's own claim
+    elsewhere in this app. This also sidesteps a real, measured risk: adding another required
     per-entry schema field was what caused the empty-output reliability regression documented above
     — deriving this instead of asking the model to report it adds the capability with zero added
     schema complexity.
@@ -1632,49 +1755,47 @@ def _find_bates_for_quote(doc_text: str | None, quote: str | None) -> str | None
     over-matching against unrelated text.
     """
     if not doc_text or not quote:
-        return None
-    markers = list(_BATES_MARKER_PATTERN.finditer(doc_text))
+        return None, None
+    markers = list(_PAGE_MARKER_PATTERN.finditer(doc_text))
     if not markers:
-        return None
+        return None, None
 
-    def normalize_for_match(s: str) -> str:
-        for orig, repl in (("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
-                           ("–", "-"), ("—", "-")):
-            s = s.replace(orig, repl)
-        return re.sub(r"\s+", " ", s.strip())
-
-    norm_quote = normalize_for_match(quote)
+    norm_quote = _normalize_quote_text(quote)
     if not norm_quote:
-        return None
+        return None, None
     for i, m in enumerate(markers):
         seg_start = m.end()
         seg_end = markers[i + 1].start() if i + 1 < len(markers) else len(doc_text)
-        norm_segment = normalize_for_match(doc_text[seg_start:seg_end])
+        norm_segment = _normalize_quote_text(doc_text[seg_start:seg_end])
         if norm_quote in norm_segment:
-            return m.group(1)
-    return None
+            return m.group(2), int(m.group(1))
+    return None, None
 
 
 def _resolve_bates(findings: dict, filename_to_text: dict) -> None:
-    """Mutates `findings` in place, attaching a derived `bates` (or `bates_list`, for discrepancies
-    which cite multiple source files at once) to every citable item — see _find_bates_for_quote.
-    A quote that can't be located in its claimed source (e.g. a near-miss paraphrase, or a source
-    file whose text couldn't be read) gets `bates: None` rather than a guessed/fabricated value —
-    the frontend treats that the same as any other unresolvable citation, never inventing a page
-    reference. Applied to every entry type this app produces a citation for: the five dated-entry
-    lists, potential_issues, and discrepancies.
+    """Mutates `findings` in place, attaching a derived `bates`/`page_number` (or `bates_list`/
+    `page_number_list` for discrepancies, which cite multiple source files at once) to every citable
+    item — see _find_citation_for_quote. A quote that can't be located in its claimed source (e.g. a
+    near-miss paraphrase, or a source file whose text couldn't be read) gets both as None rather
+    than a guessed/fabricated value — the frontend treats that as any other unresolvable citation,
+    never inventing a page reference. `page_number` exists specifically as a real fallback for the
+    PAGE column when a document simply isn't Bates-stamped (bates is None but the quote genuinely
+    was located, so its page IS known). Applied to every entry type this app produces a citation
+    for: the five dated-entry lists, potential_issues, and discrepancies.
     """
     for key in _DATED_LIST_FIELDS + ("potential_issues",):
         for item in findings.get(key, []) or []:
             doc_text = filename_to_text.get(item.get("source_file"))
-            item["bates"] = _find_bates_for_quote(doc_text, item.get("quote"))
+            item["bates"], item["page_number"] = _find_citation_for_quote(doc_text, item.get("quote"))
     for item in findings.get("discrepancies", []) or []:
         source_files = item.get("source_files") or []
         quotes = item.get("quotes") or []
-        item["bates_list"] = [
-            _find_bates_for_quote(filename_to_text.get(src), quote)
+        resolved = [
+            _find_citation_for_quote(filename_to_text.get(src), quote)
             for src, quote in zip(source_files, quotes)
         ]
+        item["bates_list"] = [b for b, _ in resolved]
+        item["page_number_list"] = [p for _, p in resolved]
 
 
 def _dedupe_with_multi_source(items: list) -> list:
@@ -1904,14 +2025,14 @@ def _merge_chunk_findings(chunk_findings: list) -> dict:
     boundaries) — a real, known limitation of chunking, not silently pretended away. See the
     warning this triggers in _generate_chronology.
     """
-    merged = {"timeline": [], "medications": [], "procedures": [], "diagnoses": [], "labs": [],
+    merged = {"timeline": [], "visits": [], "medications": [], "procedures": [], "diagnoses": [], "labs": [],
               "potential_issues": [], "discrepancies": [], "summary": [], "patient_demographics": {},
               "record_sources": []}
     for cf in chunk_findings:
         # record_sources: each chunk only ever sees a disjoint subset of the case's documents (a
         # document is never split across chunks unless individually oversized — see
-        # _pack_into_chunks), so plain concatenation is correct here, same as timeline/discrepancies.
-        for key in ("timeline", "discrepancies", "record_sources"):
+        # _pack_into_chunks), so plain concatenation is correct here, same as timeline/visits/discrepancies.
+        for key in ("timeline", "visits", "discrepancies", "record_sources"):
             merged[key].extend(cf.get(key, []))
         for key in _ATOMIC_LIST_FIELDS:
             merged[key].extend(cf.get(key, []))
@@ -2066,6 +2187,7 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
 
     findings = _merge_chunk_findings(chunk_results) if len(chunk_results) > 1 else chunk_results[0]
     _normalize_dates(findings)
+    _reconcile_source_files(findings, filename_to_text)
     _resolve_bates(findings, filename_to_text)
     _dedupe_all_with_multi_source(findings)
     _assign_finding_ids(findings)  # after dedup, so a merged item's id is computed on its final
@@ -2298,6 +2420,12 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
             "identity_name": g.get("identity_name"),
             "identity_dob": g.get("identity_dob"),
             "file_count": len(g["files"]),
+            # Relative paths this group is SUPPOSED to cover, independent of db.record_processed_files
+            # (which only runs once this group's own generation, incl. synthesis, is fully done — see
+            # _resume_incomplete_case_jobs, which needs this to detect a group as still-incomplete
+            # even in the narrow window where "status" already briefly says "done" but the files
+            # haven't actually been recorded yet).
+            "files": [str(p.relative_to(folder)) for p in g["files"]],
             "status": "pending",
         }
     manifest["status"] = "processing"
@@ -2351,13 +2479,22 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
             # never lose the group's own already-successful chronology). See _synthesize_case_summary.
             if key == primary_key:
                 try:
+                    demographics = result["findings"].get("patient_demographics") or {}
                     synthesis = _synthesize_case_summary(
-                        result["findings"].get("timeline", []), dol, facts_summary, case_context,
+                        result["findings"].get("timeline", []), result["findings"].get("visits", []),
+                        demographics, dol, facts_summary, case_context,
                     )
                     manifest["dol"] = synthesis.get("dol") or dol
                     manifest["groups"][key]["findings"]["summary"] = (
                         synthesis.get("summary") or result["findings"].get("summary")
                     )
+                    # Fill gaps only — never let the synthesis pass overwrite an already-real,
+                    # per-chunk-extracted value (same "first real value wins" caution as the
+                    # per-chunk merge itself, just applied one layer later).
+                    for field, value in (synthesis.get("patient_demographics") or {}).items():
+                        if _realish(value) and not _realish(demographics.get(field)):
+                            demographics[field] = value
+                    manifest["groups"][key]["findings"]["patient_demographics"] = demographics
                 except Exception as e:
                     applog.log_event(
                         "case_synthesis_failed", f"Case-level DOL/summary synthesis failed: {type(e).__name__}",
@@ -2396,10 +2533,18 @@ def _run_case_rescan(job_id: str) -> None:
     _run_case_job, which records every file it processes), reprocesses ONLY those, and merges the
     results into the existing chronology rather than starting over. New files by relative path only
     (not content changes to an already-processed file — a deliberate scope boundary, see
-    TEST_RESULTS.md)."""
+    TEST_RESULTS.md).
+
+    Also doubles as the crash-resume mechanism (see _resume_incomplete_case_jobs): when this is
+    called on a job whose overall `status` ISN'T already "done" (i.e. this is a resume, not an
+    ordinary reviewer-triggered rescan on an already-complete case), this function also owns
+    flipping `status` to "done"/"error" once it finishes — ordinarily that's _run_case_job's job
+    alone, but a resumed job never goes through that function again.
+    """
     manifest = _get_batch_manifest(job_id)
     if manifest is None:
         return
+    was_already_done = manifest.get("status") == "done"
 
     manifest["rescan_status"] = "processing"
     manifest["rescan_message"] = None
@@ -2419,6 +2564,9 @@ def _run_case_rescan(job_id: str) -> None:
             manifest["rescan_status"] = "done"
             manifest["rescan_message"] = "No new files found — this case's folder hasn't changed."
             manifest["rescan_finished_at"] = time.time()
+            if not was_already_done:
+                manifest["status"] = "done"
+                manifest["finished_at"] = time.time()
             _save_batch_manifest(job_id, manifest)
             return
 
@@ -2510,6 +2658,7 @@ def _run_case_rescan(job_id: str) -> None:
                     copied_paths, detail_level, case_context=group_context, on_progress=on_progress
                 )
 
+                new_rel_paths = [str(p.relative_to(folder)) for p in g["files"]]
                 if is_new_group:
                     manifest["groups"][key].update({
                         "status": "done", "progress_text": None,
@@ -2519,6 +2668,7 @@ def _run_case_rescan(job_id: str) -> None:
                         "record_source_labels": new_result["record_source_labels"],
                         "page_counts": new_result["page_counts"],
                         "file_count": len(g["files"]),
+                        "files": new_rel_paths,
                     })
                 else:
                     merged = _merge_incremental_group_result(manifest["groups"][key], new_result)
@@ -2530,20 +2680,27 @@ def _run_case_rescan(job_id: str) -> None:
                         "record_source_labels": merged["record_source_labels"],
                         "page_counts": merged["page_counts"],
                         "file_count": manifest["groups"][key].get("file_count", 0) + len(g["files"]),
+                        "files": (manifest["groups"][key].get("files") or []) + new_rel_paths,
                     })
 
                 # Re-run case-level DOL/summary synthesis so it reflects the now-updated primary
                 # timeline — same reasoning and failure handling as _run_case_job's own call.
                 if key == primary_key:
                     try:
+                        demographics = manifest["groups"][key]["findings"].get("patient_demographics") or {}
                         synthesis = _synthesize_case_summary(
                             manifest["groups"][key]["findings"].get("timeline", []),
+                            manifest["groups"][key]["findings"].get("visits", []), demographics,
                             manifest.get("dol"), manifest.get("facts_summary"), case_context,
                         )
                         manifest["dol"] = synthesis.get("dol") or manifest.get("dol")
                         manifest["groups"][key]["findings"]["summary"] = (
                             synthesis.get("summary") or manifest["groups"][key]["findings"].get("summary")
                         )
+                        for field, value in (synthesis.get("patient_demographics") or {}).items():
+                            if _realish(value) and not _realish(demographics.get(field)):
+                                demographics[field] = value
+                        manifest["groups"][key]["findings"]["patient_demographics"] = demographics
                     except Exception as e:
                         applog.log_event(
                             "case_synthesis_failed", f"Case-level DOL/summary synthesis failed: {type(e).__name__}",
@@ -2564,15 +2721,117 @@ def _run_case_rescan(job_id: str) -> None:
         manifest["rescan_status"] = "done"
         manifest["rescan_message"] = f"Processed {len(new_paths)} new file(s) across {len(new_groups)} group(s)."
         manifest["rescan_finished_at"] = time.time()
+        if not was_already_done:
+            manifest["status"] = "done"
+            manifest["finished_at"] = time.time()
         _save_batch_manifest(job_id, manifest)
     except Exception as e:
         manifest["rescan_status"] = "done"
         manifest["rescan_message"] = f"Rescan failed: {e}"
+        if not was_already_done:
+            # A resumed job that still fails on retry must be visibly stuck, not silently stay
+            # "processing" forever (which would otherwise re-trigger identically on every restart).
+            manifest["status"] = "error"
+            manifest["error"] = f"Resume after restart failed: {e}"
         applog.log_event(
             "case_rescan_failed", f"Rescan failed: {type(e).__name__}",
             level="ERROR", context={"job_id": job_id}, exc_info=sys.exc_info(),
         )
         _save_batch_manifest(job_id, manifest)
+
+
+def _resume_incomplete_case_jobs() -> None:
+    """Called once at server startup, before app.run(). A case job (or a "check for new files"
+    rescan) runs in a background thread tied to this process — if the machine loses power or the
+    app is force-quit mid-run, that thread is gone forever, but the manifest itself survives
+    (SQLite, written after every meaningful step — see _save_batch_manifest). Without this, such a
+    job is silently stuck at "processing" forever with no way to finish short of starting an
+    entirely new case from scratch (the exact complaint from a real 50-file case: a laptop died
+    halfway through).
+
+    Resumes by reusing the SAME codepath as "Check for new files" (_run_case_rescan) — it already
+    knows, per group, exactly which files were never fully processed (db.get_processed_paths is
+    only populated once a group's own chronology generation fully completes — see
+    db.record_processed_files at the end of both _run_case_job's and _run_case_rescan's per-group
+    loops), so a group that had already finished before the crash is left completely untouched, and
+    one that was mid-way through gets redone from that group's own start — not resumed mid-chunk
+    (nothing in this pipeline checkpoints at that finer a grain), but still far better than losing
+    the whole case.
+    """
+    for manifest in db.list_case_manifests():
+        job_id = manifest["job_id"]
+        status = manifest.get("status")
+
+        if status == "done" and manifest.get("rescan_status") == "processing":
+            # An interrupted "Check for new files" rescan on an otherwise-complete case — safe to
+            # just re-run directly: rescan's own on_progress never touches a group's findings
+            # mid-flight (only progress_text does), so nothing partial needs clearing first.
+            applog.log_event(
+                "case_rescan_resumed", "Resuming interrupted rescan after restart",
+                context={"job_id": job_id},
+            )
+            threading.Thread(target=_run_case_rescan, args=(job_id,), daemon=True).start()
+            continue
+
+        if status not in ("scanning", "processing"):
+            continue  # "done" (no stuck rescan) / "error" — nothing to resume
+
+        if not manifest.get("groups"):
+            # Crashed before Phase 3 (grouping) ever completed — nothing group-specific was
+            # persisted yet, so a full fresh run (complaint extraction included) is simplest and
+            # correct; there's no partial per-group state to preserve at this early a stage.
+            applog.log_event(
+                "case_job_resumed", "Resuming interrupted case job (pre-grouping) after restart",
+                context={"job_id": job_id},
+            )
+            threading.Thread(
+                target=_run_case_job, args=(
+                    job_id, Path(manifest["source_dir"]), manifest.get("folder_display_name", ""),
+                    manifest.get("detail_level", DEFAULT_DETAIL_LEVEL), manifest["plaintiff_name"],
+                    manifest.get("priority_hint", ""), manifest.get("defendant_names") or [],
+                ), daemon=True,
+            ).start()
+            continue
+
+        # Past grouping — one or more groups may have been mid-generation when the crash happened.
+        # A group's own "status" field alone isn't trustworthy here: status flips to "done" (see
+        # _run_case_job/_run_case_rescan) BEFORE db.record_processed_files runs (that write happens
+        # last, after the case-level synthesis pass) — a crash in that narrow window would leave a
+        # group showing "done" with genuinely complete, correct findings, yet none of its files
+        # actually recorded as processed. Cross-check against the real source of truth instead.
+        processed_paths = db.get_processed_paths(job_id)
+        stuck = []
+        for key, g in manifest["groups"].items():
+            group_files = set(g.get("files") or [])
+            if g.get("status") == "done" and (not group_files or group_files.issubset(processed_paths)):
+                continue  # genuinely complete and recorded — leave entirely untouched
+            if g.get("status") == "done" and group_files and not group_files.issubset(processed_paths):
+                # Findings are already complete and correct — only the bookkeeping write was
+                # interrupted. Finish that cheaply rather than wastefully regenerating good results.
+                db.record_processed_files(job_id, key, sorted(group_files))
+                continue
+            stuck.append(key)
+
+        # Clear a genuinely-stuck group's transient generation state (findings/stats/etc, all
+        # possibly a PARTIAL snapshot from the interrupted run's own on_progress callback) before
+        # handing off to rescan, so its merge-with-existing-findings starts from empty rather than
+        # double-counting whatever had already been saved right before the crash. file_count resets
+        # to 0 for the same reason — rescan's merge branch ADDS the reprocessed file count on top of
+        # whatever's already there (see _run_case_rescan), which was already the group's full
+        # intended count from Phase 3, so leaving it as-is would double it.
+        for key in stuck:
+            manifest["groups"][key].update({
+                "status": "pending", "progress_text": None, "findings": {}, "stats": {},
+                "warnings": [], "ocr_files": [], "source_filenames": [],
+                "record_source_labels": {}, "page_counts": {}, "file_count": 0,
+            })
+        manifest["status"] = "processing"
+        _save_batch_manifest(job_id, manifest)
+        applog.log_event(
+            "case_job_resumed", f"Resuming interrupted case job after restart ({len(stuck)} group(s))",
+            context={"job_id": job_id},
+        )
+        threading.Thread(target=_run_case_rescan, args=(job_id,), daemon=True).start()
 
 
 @app.route("/case")
@@ -3103,6 +3362,7 @@ def analyze():
             return
 
         _normalize_dates(findings)
+        _reconcile_source_files(findings, filename_to_text)
         _resolve_bates(findings, filename_to_text)
         _dedupe_all_with_multi_source(findings)
         _assign_finding_ids(findings)
@@ -3127,6 +3387,7 @@ def analyze():
             "ocr_files": ocr_files,
             "record_source_labels": record_source_labels,
             "page_counts": page_counts,
+            "source_filenames": list(filename_to_text.keys()),
         })
 
     resp = Response(stream_with_context(generate()), mimetype="application/x-ndjson")
@@ -3142,4 +3403,5 @@ if __name__ == "__main__":
     # 127.0.0.1 isn't reachable via that forwarding. The container is still not exposed beyond the
     # host, because the compose file publishes this port as `127.0.0.1:5050:5050` on the host side
     # — see docker-compose.yml. (_BIND_HOST itself is set at module load — see its definition above.)
+    _resume_incomplete_case_jobs()
     app.run(host=_BIND_HOST, port=PORT, debug=False, threaded=True)

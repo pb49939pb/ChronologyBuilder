@@ -697,9 +697,11 @@ button:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
   margin-top: 0.5rem;
   font-size: 0.85rem;
 }
-/* DATE/PAGE/RECORD/SOURCE stay narrow and fixed; DESCRIPTION (the actual finding text) takes
-   whatever's left — matters more now that the table has real room to use (see .modal-box-wide). */
-.preview-table col.preview-col-narrow { width: 9%; }
+/* DATE/PAGE/RECORD SOURCE combined ~1/3 of the table, DESCRIPTION (the actual finding text) the
+   remaining ~2/3 — an explicit user requirement, not a stylistic default. RECORD SOURCE is
+   slightly wider than DATE/PAGE since labels run longer than either a date or a page number. */
+.preview-table col.preview-col-narrow { width: 10%; }
+.preview-table col.preview-col-source { width: 13%; }
 .preview-table col.preview-col-desc { width: auto; }
 .preview-table td, .preview-table th { word-break: break-word; }
 .preview-table th, .preview-table td {
@@ -1105,6 +1107,41 @@ button:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
   flex-shrink: 0;
 }
 .modal-header-row h3 { margin: 0; }
+.files-analyzed-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.files-analyzed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.files-analyzed-row:hover { background: var(--finding-hover-bg); }
+.files-analyzed-name { font-weight: 600; }
+.files-analyzed-filename { font-weight: 400; color: var(--muted); font-size: 0.85rem; margin-left: 0.4rem; }
+.files-analyzed-flag {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: var(--warn-bg);
+  color: var(--warn-text, var(--text));
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;

@@ -2457,3 +2457,97 @@ downloaded the actual published `v0.0.10` `.dmg` from GitHub (checksum matched t
 byte-for-byte), installed it fresh, and launched it. Its log now shows
 `update_not_available: "Already on the latest version"` on that same automatic launch-time check —
 the real failure mode is gone, not just theoretically fixed. Version badge confirmed `v0.0.10`.
+
+## Auto-update still didn't work on the wife's real Windows install — a second, different root cause (2026-08-02)
+
+Real user report on `v0.0.12`: "auto-update didn't work, had to manually download/install from
+GitHub instead of the app detecting and installing it." The prerelease fix above was verified on Mac
+only, and there's no CI that builds/publishes the Windows side at all (`.github/workflows/` has just
+the version-bump workflow — every Windows release has been built on real Windows hardware and its
+artifacts uploaded to the GitHub Release by hand, outside anything a coding session here could
+previously see or test).
+
+Checked the actual live GitHub releases directly (`gh release view <tag> --json assets`) rather than
+guessing, and found the real cause immediately: `v0.0.12`'s release has
+`Chronology.Builder.Setup.0.0.12.exe` + `.exe.blockmap`, but **no `latest.yml`** — only
+`latest-mac.yml` (from the separately-built Mac artifacts) was present. Confirmed via
+`node_modules/electron-updater/out/NsisUpdater.js`/`electronHttpExecutor.js` that Windows's
+`NsisUpdater` looks specifically for a file literally named `latest.yml` and has no other fallback —
+so every Windows client's auto-update check found nothing to update to, no matter how new the actual
+release was. Also checked `v0.0.11` for the same class of problem and found a second, related bug:
+its `latest.yml` DOES exist, but its internal `url`/`path` field says
+`Chronology-Builder-Setup-0.0.11.exe` (hyphens) while the actually-uploaded asset is named
+`Chronology.Builder.Setup.0.0.11.exe` (dots) — a filename mismatch that would 404 the download even
+though the metadata file itself was present. Both are consistent with the same root cause: a manual,
+non-automated release process with no validation step, not a bug in this app's own code.
+
+Also definitively resolved a previously-`unverified` question this same code had flagged
+(`electron/main.js`'s `installNetworkAllowlist` comment): does electron-updater's HTTP traffic go
+through Electron's default session, where the app's own network allowlist could plausibly be
+blocking it? Read `electron-updater`'s actual source
+(`node_modules/electron-updater/out/electronHttpExecutor.js`) — its `ElectronHttpExecutor` uses
+`electron.net.request()` through `session.fromPartition("electron-updater", ...)`, a completely
+separate session from `session.defaultSession`. The allowlist hook never sees this traffic at all,
+in either direction — ruled out as a cause, and the comment (which had said this was unverified)
+updated to state the confirmed finding.
+
+**Fixed for the currently-stuck real release, not just documented for next time**: downloaded the
+actual `v0.0.12` `.exe` from GitHub, computed its real sha512 (base64) and byte size, built a
+correct `latest.yml` pointing at the exact real asset filename, and uploaded it to the existing
+`v0.0.12` release (`gh release upload v0.0.12 latest.yml`) — confirmed fetchable afterward at
+`https://github.com/pb49939pb/ChronologyBuilder/releases/download/v0.0.12/latest.yml`. Any Windows
+install still on an older version should now find and install `v0.0.12` on its next automatic check.
+
+**Fixed the process, not just this one instance**: added `scripts/generate_latest_yml.py` (takes
+just the already-built `.exe` path and version, computes the sha512/size, writes a correctly-shaped
+`latest.yml` reading the real filename directly off the file rather than it being typed/guessed
+separately — the exact mistake that produced `v0.0.11`'s mismatch). Documented the whole requirement
+prominently in `DESKTOP_PACKAGING.md`'s Windows build steps: all three of the `.exe`, `.exe.blockmap`,
+and `latest.yml` must be uploaded together, every release, with no exceptions.
+
+**Not verified end-to-end** (no Windows machine available in this environment, same limitation noted
+throughout this file): a real Windows install actually picking up this newly-uploaded `latest.yml`
+and completing a real download+install. The fix is grounded in reading electron-updater's own source
+for its exact file-lookup/hash-verification behavior, not assumption, and the uploaded file was
+confirmed byte-correct (sha512/size recomputed independently from the same downloaded `.exe`), but
+the actual live Windows auto-update flow (NSIS silent install, UAC prompt behavior on an unsigned
+installer, etc.) still needs a real confirmation on her actual machine.
+
+## A serious, real bug found via regression testing: the prompt's own worked example was contaminating output (2026-08-02)
+
+Re-ran `testing/verify_durable_storage.py` (flagged earlier this session as needing a re-run given
+the scale of `app.py`/`app.js` changes) as a final check before wrapping up, using
+`sample_data/case_000_pdfs` (a single 1-page document, chief complaint: sore throat). It failed:
+"highlight boxes in fresh context: 0" — the citation existed and the right PDF loaded, but nothing
+highlighted. Bisected via `git stash` (reverting `app.py`/`app.js`/prompts to clean `HEAD`, re-running
+against the exact same fixture) to separate a real regression from ordinary LLM non-determinism, and
+inspecting the actual finding JSON both times.
+
+What that turned up was much more serious than a highlighting glitch: the extracted "text" for
+`record_01.pdf` (a sore-throat visit) described a completely different clinical scenario — left ear
+pain, a ruptured eardrum, Ciprodex — verbatim, sentence for sentence. That exact passage was a
+"Worked example" added to `prompts/chronology_prompt_structured.txt`'s VISITS section earlier this
+same session (built to match the anonymized real visit-note style the user shared, meant purely to
+illustrate the target level of narrative richness) — written as a full, fluent, concrete clinical
+narrative rather than an abstract template, which made it easy for the model to reproduce wholesale
+as if it were real output for an unrelated document, rather than treating it as a style guide. This
+is exactly why the quote didn't highlight: the fabricated text's "quote" was a truncated, non-verbatim
+fragment that doesn't literally appear anywhere in the real document, so neither the server's nor the
+browser's exact-match search could locate it — a downstream symptom of upstream fabrication, not an
+independent bug in the highlighter.
+
+**Fixed**: rewrote the worked example to be an explicit, bracketed schematic (`"Presents for
+[complaint] x[duration], previously seen at [prior care setting]..."`) instead of a fluent concrete
+narrative, plus an explicit instruction never to reuse this example's specific wording/symptoms/
+medication for any real document. **Verified for real**: reran the same `case_000_pdfs` fixture — the
+extracted text now correctly describes the sore throat/strep/amoxicillin visit that's actually in the
+document, with no trace of the old example's content; Bates/page-number resolution succeeded (exact
+quote now genuinely present in the source); a live Playwright click on the citation correctly
+highlighted the real passage. Reran `testing/verify_durable_storage.py` and
+`testing/verify_export_confirm_modal.py` in full afterward — both pass clean.
+
+This was found only because a full regression pass was run before considering this phase's work
+done, not because anything about the original symptom (a highlighting failure) pointed at a prompt-
+contamination root cause — worth remembering next time a "worked example" gets added to any prompt:
+prefer an abstract/bracketed template over a fluent concrete narrative, precisely because a fluent
+example is a fabrication risk, not just a style choice.

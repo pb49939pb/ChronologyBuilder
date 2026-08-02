@@ -84,6 +84,28 @@ fresh coding agent with no context on this machine); short version:
 5. `npm run dist` (from `electron/`) — produces the NSIS installer via the `win.extraResources`
    config in `package.json`, which expects exactly the two directories built in steps 3-4.
 
+**Critical, confirmed-the-hard-way requirement for uploading a Windows release: `latest.yml` is not
+optional.** There's no CI that runs `electron-builder --publish`, so every release so far has been
+built locally and its artifacts uploaded to the GitHub Release by hand — and `v0.0.12`'s release
+shipped `Chronology.Builder.Setup.0.0.12.exe` (+ `.exe.blockmap`) with NO `latest.yml` at all (only
+`latest-mac.yml`, from the separately-built Mac release, was present). `electron-updater`'s
+`NsisUpdater` looks specifically for a file literally named `latest.yml` in the newest release and
+has no fallback if it's missing — every Windows install's auto-update check silently found nothing
+to update to, and the only way to actually get the new version was a manual download from the
+Releases page. This is the exact bug a real user hit and reported (fixed after the fact by uploading
+a correctly-generated `latest.yml` to the existing `v0.0.12` release — see git history/TEST_RESULTS.md
+for 2026-08-02). `npm run dist` writes `latest.yml` locally next to the `.exe` — it's just easy to
+forget to also grab/upload that file when copying artifacts off the build machine by hand. **Always
+upload all three: the `.exe`, its `.blockmap`, and `latest.yml`.** If `latest.yml` was somehow lost
+(built on a machine no longer available, etc.), regenerate it with `python3
+scripts/generate_latest_yml.py <path-to-installer.exe> <version>` — it only needs the already-built
+`.exe` itself (computes the sha512/size electron-updater checks, and reads the real filename
+directly off the file you point it at rather than it being typed/guessed separately). Also worth
+checking on any future release: `v0.0.11`'s `latest.yml` had `url`/`path` set to
+`Chronology-Builder-Setup-0.0.11.exe` (hyphens) while the actually-uploaded asset was named
+`Chronology.Builder.Setup.0.0.11.exe` (dots) — a filename mismatch from manual renaming somewhere in
+that release's process, which would have 404'd the download even with `latest.yml` present.
+
 **Verdict: yes, fully doable, no fundamental blocker.** This is a normal, well-trodden pattern for
 local-AI desktop tools (LM Studio, GPT4All, Ollama's own Mac app all do a version of this). It's a
 real but bounded packaging effort — roughly a few focused days of work, not a research problem —

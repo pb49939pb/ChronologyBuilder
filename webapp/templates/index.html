@@ -59,6 +59,7 @@
         <div class="review-bar">
           <span id="review-progress" class="review-progress"></span>
           <div class="review-bar-actions">
+            <button type="button" id="files-analyzed-btn" class="secondary-btn" style="display:none;">Files Analyzed</button>
             <button type="button" id="preview-chronology-btn" class="secondary-btn">Preview Chronology</button>
             <button id="export-btn" type="button">Export Approved Chronology</button>
           </div>
@@ -125,6 +126,21 @@
         <button type="button" id="chronology-preview-close" class="secondary-btn">Close</button>
       </div>
       <div id="chronology-preview" class="chronology-preview"></div>
+    </div>
+  </div>
+
+  <!-- Every source file this case actually ingested and ran through the model, so the reviewer can
+       confirm nothing was silently skipped — see renderFilesAnalyzedList() in app.js. Distinct from
+       the Chronology Preview modal above (that shows the OUTPUT; this shows the INPUT coverage). -->
+  <div id="files-analyzed-modal" class="modal-overlay" style="display:none;">
+    <div class="modal-box-wide">
+      <div class="modal-header-row">
+        <h3>Files Analyzed</h3>
+        <button type="button" id="files-analyzed-close" class="secondary-btn">Close</button>
+      </div>
+      <p class="field-hint">Every document this case's analysis actually read. Click one to open it in the
+        viewer. A file flagged below produced zero extracted findings of any kind — worth a manual look.</p>
+      <div id="files-analyzed-list" class="files-analyzed-list"></div>
     </div>
   </div>
 

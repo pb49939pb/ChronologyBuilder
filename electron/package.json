@@ -1,6 +1,6 @@
 {
   "name": "lawfirmagent-desktop",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Desktop shell for Chronology Builder",
   "private": true,
   "main": "main.js",

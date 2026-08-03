@@ -34,23 +34,20 @@ in earlier testing — do not repeat them):
 - Do not infer or reassign a provider's role beyond what the source states for them.
 - Do not reuse or duplicate content from one date's entry as the content for a different date.
 
-EVERY FINDING MUST INCLUDE A REAL SOURCE FILE AND AN EXACT QUOTE — NO EXCEPTIONS, NO PLACEHOLDERS
-For every timeline event, potential issue, and discrepancy you report, "source_file" must be copied
-EXACTLY from the "### Document N — filename" header line we give you above each document below —
-never anything from inside the document's own body text. Real case documents are frequently
-Bates-stamped (e.g. a document might begin "[BATES: MED000001]") or carry their own internal record
-number/heading — do NOT use a Bates number, record number, or any other identifier that appears
-WITHIN a document's text as "source_file", even though it looks like a document identifier and even
-though real litigation practice normally DOES reference documents by Bates number. Here, "source_file"
-means only the literal filename from OUR header line, character for character (e.g. "record_01.pdf"),
-never "MED000001" or "MED000001.pdf" or similar.
-
-ALSO DO NOT construct "source_file" from the document's position/number in "### Document N —
-filename" — N is just this prompt's own running count of documents and has NO relationship to any
-number that may appear in the filename itself. Concrete example of the mistake to avoid: if a
-document is labeled "### Document 8 — record_01.pdf", the correct source_file is "record_01.pdf" —
-NOT "record_08.pdf", even though that looks like a plausible filename pattern. Copy the filename
-text itself; never compute or guess a filename from N.
+EVERY FINDING MUST INCLUDE THE CORRECT DOCUMENT NUMBER AND AN EXACT QUOTE — NO EXCEPTIONS, NO PLACEHOLDERS
+For every timeline event, potential issue, and discrepancy you report, "file_id" must be EXACTLY the
+number N in that document's own "### Document N — filename" header line below — copy that number
+itself, character for character. This IS asking you to use the document's position/count this time
+(unlike a Bates number or record number, which you must never use here) — "file_id" always means the
+literal number after the word "Document" in the one header that introduces the document the fact
+actually came from, nothing else. Real case documents are frequently Bates-stamped (e.g. a document
+might begin "[BATES: MED000001]") or carry their own internal record number/heading — never use a
+Bates number, record number, or any other identifier that appears WITHIN a document's text as
+"file_id", even though it looks like a document identifier and even though real litigation practice
+normally DOES reference documents by Bates number. Concrete example: if a document is labeled
+"### Document 8 — record_01.pdf" and your finding came from that document, "file_id" is the integer
+8 — never derive anything from the filename itself, never guess, never reuse a number from a
+different document's header.
 
 And "quote" must be text COPIED EXACTLY,
 character-for-character, from that file's body — not a paraphrase, not a summary. This exact quote is
@@ -68,12 +65,13 @@ wording. Two specific mistakes have shown up in testing and must not be repeated
   naturally). Copy the words in the exact order the source has them, however awkward that reads as
   a standalone fragment.
 
-If you cannot identify both a real source file AND an exact supporting quote for something, DO NOT
-include it as a finding at all — leave it out entirely. Never write "not stated," "not applicable,"
-"none," "n/a," or any other placeholder text as the value of source_file or quote. Those two fields
-either contain a real filename and a real verbatim quote, or the finding does not appear in your
-response. (This is different from the "date" field, where "not stated" is the correct thing to write
-when a date genuinely isn't given — date, source_file, and quote are not the same kind of field.)
+If you cannot identify both the correct file_id AND an exact supporting quote for something, DO NOT
+include it as a finding at all — leave it out entirely. Never write 0, -1, or any other placeholder
+value as "file_id", and never write "not stated," "not applicable," "none," "n/a," or any other
+placeholder text as "quote". Those two fields either contain the real document number and a real
+verbatim quote, or the finding does not appear in your response. (This is different from the "date"
+field, where "not stated" is the correct thing to write when a date genuinely isn't given — date and
+file_id/quote are not the same kind of field.)
 
 DISTINGUISH CAREFULLY
 - Clinical event time (when something actually happened) vs. documentation time (when a note was
@@ -111,23 +109,17 @@ paragraph is the correct length when the source document supports one. This appl
 "detailed"/"standard" runs especially; even at "brief," a genuinely significant visit still needs
 enough of the above to be useful to an attorney who never reads the underlying document.
 
-Worked example — this shows the SHAPE a rich "text" narrative should take, not real content. It is
-a schematic pattern, not a document to imitate the wording of: a genuinely thorough "text" for a
-visit/encounter weaves together whichever of chief complaint, prior care sought elsewhere (and
-whether it helped), pertinent review-of-systems findings, physical exam findings, any procedure
-performed, and assessment/plan/medication (name, dose, frequency, duration) the SOURCE DOCUMENT
-itself actually states — into one narrative paragraph, the way an experienced nurse paralegal would
-write it, e.g. in the shape of: "Presents for [complaint] x[duration], previously seen at [prior
-care setting] who [prior finding/treatment, and whether it helped]. ROS: [pertinent positives/
-negatives]. Exam: [abnormal findings]. [Procedure performed, if any]. Plan: [plan details].
-Prescribed [medication, dose, frequency, duration]." Every bracketed piece must come from THIS
-document alone — never invent, and never reuse wording, symptoms, findings, or a medication name
-from this instruction itself; a document about an unrelated complaint (e.g. a sore throat) must
-never produce a narrative describing ear pain, Ciprodex, or any other detail that isn't actually
-present in what you were given to read.
-NOT acceptable for the same note: "Lab Report — ear culture, negative" (drops nearly everything
-clinically relevant in the document down to one incidental lab result) — that specific phrase is
-itself just an illustration of "too terse," not a real finding either.
+IMPORTANT — do not copy any example sentence, phrase, or template pattern from these instructions
+into your output, not even with words swapped out. A genuinely thorough "text" for a visit/encounter
+is written entirely from scratch, in your own words, using ONLY the chief complaint, history,
+review-of-systems findings, exam findings, procedures, and assessment/plan/medication details that
+THIS SPECIFIC document actually states — combined into one flowing narrative paragraph, the way an
+experienced nurse paralegal would write it. If you find yourself writing a bracketed placeholder
+like "[complaint]" or "[finding]" anywhere in "text" or "quote", stop — that means you are copying
+a template instead of describing this document's own real, specific facts, and the finding must be
+rewritten (or omitted, per the omit-rather-than-guess rule) before you continue.
+NOT acceptable for the same note: a one-line label such as "Lab Report — ear culture, negative"
+(drops nearly everything clinically relevant in the document down to one incidental lab result).
 IMPORTANT — this richness applies ONLY to "text", never to "quote": "quote" is a completely separate
 field with its own, opposite rule — stay short (under ~25 words) and verbatim, one supporting
 sentence or phrase, exactly as stated elsewhere in this prompt. Do not let "text" being long talk you
@@ -284,7 +276,8 @@ truly never mention, rather than inferring it from context that isn't actually t
 
 RECORD SOURCE LABELS — ONE SHORT, CONTENT-BASED NAME PER DOCUMENT
 Separately, also produce a "record_sources" list with exactly one entry per document listed in
-DOCUMENTS above (match "source_file" to each document's exact given filename). For each:
+DOCUMENTS above ("file_id" is that document's own number, same rule as everywhere else — see above).
+For each:
 - "label": a short, human-readable abbreviation based on what the document actually IS, not its
   filename — e.g. an operative report from a facility called Fairview should get a label like
   "Fairview Op", not "record_1" or a copy of the filename. MAXIMUM TWO WORDS, separated by one
@@ -312,35 +305,35 @@ Respond with ONLY a JSON object matching this shape (no other text). Fill out "m
 that reason:
 {{
   "timeline": [
-    {{"date": "...", "text": "full narrative of the encounter, see TIMELINE ENTRY DESCRIPTIONS above — not a one-line label", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "full narrative of the encounter, see TIMELINE ENTRY DESCRIPTIONS above — not a one-line label", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "visits": [
-    {{"date": "...", "text": "full narrative of this visit, see VISITS above — one entry per visit, be exhaustive", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "provider name, WITH credential e.g. 'Dr. Jane Doe, MD' or 'John Smith, PT'", "at_issue": false}}
+    {{"date": "...", "text": "full narrative of this visit, see VISITS above — one entry per visit, be exhaustive", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "provider name, WITH credential e.g. 'Dr. Jane Doe, MD' or 'John Smith, PT'", "at_issue": false}}
   ],
   "medications": [
-    {{"date": "...", "text": "medication name + dose if stated", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "medication name + dose if stated", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "procedures": [
-    {{"date": "...", "text": "procedure/test name", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "procedure/test name", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "diagnoses": [
-    {{"date": "...", "text": "diagnosis/assessment", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "diagnosis/assessment", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "labs": [
-    {{"date": "...", "text": "lab/vital name + value", "source_file": "exact filename", "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
+    {{"date": "...", "text": "lab/vital name + value", "file_id": 1, "quote": "verbatim supporting text", "record_type": "...", "author": "...", "at_issue": false}}
   ],
   "potential_issues": [
-    {{"text": "the issue, framed as a potential issue", "source_file": "exact filename", "quote": "verbatim supporting text"}}
+    {{"text": "the issue, framed as a potential issue", "file_id": 1, "quote": "verbatim supporting text"}}
   ],
   "discrepancies": [
-    {{"text": "what conflicts and why", "source_files": ["filename1", "filename2"], "quotes": ["verbatim quote from file 1", "verbatim quote from file 2"]}}
+    {{"text": "what conflicts and why", "file_ids": [1, 2], "quotes": ["verbatim quote from file 1", "verbatim quote from file 2"]}}
   ],
   "patient_demographics": {{
     "dob": "...", "address": "...", "social_history": "...", "past_medical_history": "...",
     "family_history": "...", "surgical_history": "...", "pcp": "..."
   }},
   "record_sources": [
-    {{"source_file": "exact filename", "label": "Two Words Max", "facility": "...", "description": "...", "date": "..."}}
+    {{"file_id": 1, "label": "Two Words Max", "facility": "...", "description": "...", "date": "..."}}
   ],
   "summary": "short plain-language summary of what happened overall"
 }}

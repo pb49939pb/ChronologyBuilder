@@ -15,6 +15,7 @@ immediately after the request" behavior. See webapp/README.md.
 """
 from __future__ import annotations  # lets "X | None" annotations work on Python 3.9, not just 3.10+
 
+import copy
 import hashlib
 import io
 import json
@@ -206,7 +207,28 @@ def _inject_app_version():
 
 OLLAMA_URL = os.environ.get("LAWFIRMAGENT_OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 MODEL = os.environ.get("LAWFIRMAGENT_MODEL", "llama3.1:8b")
-NUM_CTX = int(os.environ.get("LAWFIRMAGENT_NUM_CTX", "12288"))
+# Was 12288 — lowered after a real production timeout (see TEST_RESULTS.md, 2026-08-03): a chunk
+# built from this budget took long enough on a real user's Windows laptop to blow past even a
+# 30-minute per-call timeout, on multiple chunks in the same run, not a one-off. This value was
+# never actually sized for that hardware in the first place — the original 12288 was picked
+# conservatively for THIS dev machine's 16GB RAM (see the 2026-07-22 context-window finding this
+# same file documents), not verified against anything slower.
+#
+# IMPORTANT — cannot be lowered arbitrarily: the prompt's own instructional text has grown to
+# ~26,000 characters (all the accumulated extraction rules added across many sessions since that
+# 12288 default was chosen against a ~10,626-character prompt) — a NAIVE lower value (8192 was
+# tried first) actually made MAX_INPUT_CHARS go NEGATIVE, i.e. the fixed instructions alone would
+# have exceeded the whole context window before a single character of document text, causing
+# silent context overflow (part of the instructions themselves getting truncated) rather than
+# anything as obvious as an error. 11264 was chosen specifically to leave a real, non-thin margin
+# above that fixed cost (~6,300 chars/~3 pages of actual chunk budget, computed and verified
+# directly against the CURRENT prompt, not assumed) — see the hard assertion right after
+# MAX_INPUT_CHARS below, added specifically so a future prompt-overhead increase (or a careless
+# LAWFIRMAGENT_NUM_CTX override) fails loudly at startup instead of silently repeating this same
+# near-miss. Chunking (_pack_into_chunks) already exists specifically so an arbitrarily large CASE
+# never depends on a large context window — this only changes how much text goes into any ONE
+# call, trading more (smaller, faster) chunks for lower per-call timeout risk.
+NUM_CTX = int(os.environ.get("LAWFIRMAGENT_NUM_CTX", "11264"))
 CHARS_PER_TOKEN_ESTIMATE = 3.5
 OUTPUT_TOKEN_RESERVE = 2000  # structured JSON + per-finding quotes runs longer than plain prose
 
@@ -255,6 +277,23 @@ MAX_INPUT_CHARS = int(
     - OUTPUT_TOKEN_RESERVE * CHARS_PER_TOKEN_ESTIMATE
 )
 
+# A real near-miss, not a hypothetical: an earlier attempt to lower NUM_CTX's default computed a
+# NEGATIVE MAX_INPUT_CHARS (the prompt's own instructional text alone already exceeded the whole
+# context window) — which would have silently produced context overflow / degenerate chunking
+# rather than any obvious error. Fails loudly at startup instead, so a future prompt-overhead
+# increase (this file's instructional text has only ever grown across sessions) or a careless
+# LAWFIRMAGENT_NUM_CTX override surfaces immediately as a clear message, not a silent production
+# failure discovered later via a confused user report. 2000 chars is an arbitrary but deliberately
+# generous floor — enough for a genuinely tiny real document, not just "technically positive."
+if MAX_INPUT_CHARS < 2000:
+    raise RuntimeError(
+        f"MAX_INPUT_CHARS computed to {MAX_INPUT_CHARS}, too small/negative to safely chunk any "
+        f"document — NUM_CTX ({NUM_CTX} tokens) is too small relative to the prompt template's own "
+        f"instructional overhead ({_prompt_overhead_chars} characters) plus the output reserve "
+        f"({OUTPUT_TOKEN_RESERVE} tokens). Raise LAWFIRMAGENT_NUM_CTX, or shorten the prompt "
+        f"template, before starting the app."
+    )
+
 # Shared shape for every "dated entry" list (timeline/medications/procedures/diagnoses/labs) — all
 # five need the same citation-grounding fields PLUS record_type/author/ordering-reading-provider
 # (Olivia's real workflow: title each entry by record type + authoring provider, both bold) and
@@ -278,13 +317,19 @@ def _dated_entry_schema() -> dict:
             "properties": {
                 "date": {"type": "string"},
                 "text": {"type": "string"},
-                "source_file": {"type": "string"},
+                # A small integer — the number shown in that document's own "### Document N —
+                # filename" header — rather than a freeform filename string the model has to
+                # reproduce byte-for-byte. Converted back to a real "source_file" filename string
+                # immediately after the model call returns (see _resolve_file_ids), before any
+                # downstream code (Bates resolution, dedup, the frontend, exports) ever sees it —
+                # everything past that conversion point is unchanged and still keys off source_file.
+                "file_id": {"type": "integer"},
                 "quote": {"type": "string"},
                 "record_type": {"type": "string"},
                 "author": {"type": "string"},
                 "at_issue": {"type": "boolean"},
             },
-            "required": ["date", "text", "source_file", "quote", "record_type", "author", "at_issue"],
+            "required": ["date", "text", "file_id", "quote", "record_type", "author", "at_issue"],
         },
     }
 
@@ -341,10 +386,10 @@ RESPONSE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "source_file": {"type": "string"},
+                    "file_id": {"type": "integer"},
                     "quote": {"type": "string"},
                 },
-                "required": ["text", "source_file", "quote"],
+                "required": ["text", "file_id", "quote"],
             },
         },
         "discrepancies": {
@@ -353,10 +398,10 @@ RESPONSE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "source_files": {"type": "array", "items": {"type": "string"}},
+                    "file_ids": {"type": "array", "items": {"type": "integer"}},
                     "quotes": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["text", "source_files", "quotes"],
+                "required": ["text", "file_ids", "quotes"],
             },
         },
         # Case-wide (not per-entry) facts about the patient — stated once, not repeated per finding.
@@ -372,19 +417,19 @@ RESPONSE_SCHEMA = {
         # _resolve_record_sources), the same reasoning as everywhere else a hard correctness
         # requirement exists in this app. "facility"/"description"/"date" feed the Abbreviations/
         # Record Sources legend line (see _format_record_source_line) — all three degrade gracefully
-        # when a document doesn't clearly state them, only "source_file"/"label" are required.
+        # when a document doesn't clearly state them, only "file_id"/"label" are required.
         "record_sources": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "source_file": {"type": "string"},
+                    "file_id": {"type": "integer"},
                     "label": {"type": "string"},
                     "facility": {"type": "string"},
                     "description": {"type": "string"},
                     "date": {"type": "string"},
                 },
-                "required": ["source_file", "label"],
+                "required": ["file_id", "label"],
             },
         },
         "summary": {"type": "string"},
@@ -394,6 +439,42 @@ RESPONSE_SCHEMA = {
         "potential_issues", "discrepancies", "patient_demographics", "record_sources", "summary",
     ],
 }
+
+# Matches the "### Document N — filename" header _generate_chronology/the /analyze route already
+# write into a chunk/prompt's own assembled text — group 1 is the document's file_id.
+_DOC_HEADER_ID_RE = re.compile(r"^### Document (\d+)", re.MULTILINE)
+
+
+def _valid_file_ids_in_text(text: str) -> list[int]:
+    """The distinct file_ids actually present in one call's own already-assembled prompt text,
+    read straight back from the "### Document N —" headers rather than tracked separately — so
+    this can never silently drift out of sync with what chunk-packing/truncation actually produced
+    (an oversized document split into "(part K of M)" sub-blocks keeps the SAME header/number, so
+    it's still correctly included exactly once here). Feeds _response_schema_for_ids: the schema's
+    enum for this one call is restricted to exactly these ids, so the model cannot reference a
+    document it wasn't actually given in this call, or one packed into a different chunk."""
+    return sorted({int(m) for m in _DOC_HEADER_ID_RE.findall(text)})
+
+
+def _response_schema_for_ids(valid_file_ids: list[int]) -> dict:
+    """A deep copy of RESPONSE_SCHEMA with every file_id/file_ids field restricted via JSON-schema
+    "enum" to exactly the document ids present in one call's own prompt text (see
+    _valid_file_ids_in_text). Confirmed via a standalone smoke test that Ollama's grammar-
+    constrained decoding genuinely enforces "enum" on an integer field (not just "type"/
+    "required", the only constraints this schema exercised before) — even a prompt actively trying
+    to induce an out-of-enum value could not produce one. Built fresh per call rather than mutating
+    RESPONSE_SCHEMA in place, since that module-level constant must stay a stable, reusable
+    template — deep-copying a schema this small is cheap."""
+    schema = copy.deepcopy(RESPONSE_SCHEMA)
+    enum_int = {"type": "integer", "enum": valid_file_ids}
+    for field in _DATED_LIST_FIELDS + ("potential_issues",):
+        schema["properties"][field]["items"]["properties"]["file_id"] = enum_int
+    schema["properties"]["discrepancies"]["items"]["properties"]["file_ids"] = {
+        "type": "array", "items": enum_int,
+    }
+    schema["properties"]["record_sources"]["items"]["properties"]["file_id"] = enum_int
+    return schema
+
 
 COMPLAINT_RESPONSE_SCHEMA = {
     "type": "object",
@@ -1547,18 +1628,26 @@ def _call_model_for_chunk(records_text: str, detail_level: str, case_context: st
         "model": MODEL,
         "prompt": prompt,
         "stream": True,
-        "format": RESPONSE_SCHEMA,
+        # Restricted to exactly the document ids present in THIS chunk's own text — see
+        # _valid_file_ids_in_text/_response_schema_for_ids — so the model cannot reference a
+        # document that's in a different chunk or wasn't given to it at all.
+        "format": _response_schema_for_ids(_valid_file_ids_in_text(records_text)),
         "options": {"num_ctx": NUM_CTX},
     }
 
-    # Retries a fully degenerate result (every list empty, no summary) once before giving up.
-    # Verified empirically, not assumed: llama3.1:8b occasionally returns a completely empty-but-
-    # schema-valid response for a chunk that plainly has real content to extract — confirmed
-    # reproducible by calling the exact same prompt+schema back-to-back and getting a real
-    # extraction on one call and nothing on the next. This isn't unique to this app's schema (the
-    # pre-existing, much simpler 4-field schema showed the same failure at a lower but nonzero
-    # rate too) — it's a real characteristic of this model under grammar-constrained decoding on
-    # short documents, and a same-input retry reliably rescues it in practice. See TEST_RESULTS.md.
+    # Retries a fully degenerate result (every list empty, no summary), OR a request that timed out
+    # outright, once before giving up. The degenerate case is verified empirically, not assumed:
+    # llama3.1:8b occasionally returns a completely empty-but-schema-valid response for a chunk that
+    # plainly has real content to extract — confirmed reproducible by calling the exact same
+    # prompt+schema back-to-back and getting a real extraction on one call and nothing on the next.
+    # This isn't unique to this app's schema (the pre-existing, much simpler 4-field schema showed
+    # the same failure at a lower but nonzero rate too) — it's a real characteristic of this model
+    # under grammar-constrained decoding on short documents, and a same-input retry reliably rescues
+    # it in practice. See TEST_RESULTS.md. The timeout retry is the same reasoning applied to a
+    # different failure mode found in real production use (see TEST_RESULTS.md, 2026-08-03): a slow
+    # machine hitting the per-call timeout isn't necessarily stuck, just having a slow moment
+    # (thermal throttling, a background process competing for CPU) — one retry gives it a genuine
+    # second chance before the whole patient group gets marked failed.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         start = time.time()
@@ -1568,29 +1657,42 @@ def _call_model_for_chunk(records_text: str, detail_level: str, case_context: st
         eval_duration_s = 0
         last_report_time = start
 
-        # Long timeout — this runs from an unattended background thread overnight, not a live
-        # browser request, so there's no UX reason to time out quickly the way an interactive
-        # request might.
-        with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=1800) as resp:
-            resp.raise_for_status()
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                full_response += chunk.get("response", "")
+        try:
+            # Long timeout — this runs from an unattended background thread overnight, not a live
+            # browser request, so there's no UX reason to time out quickly the way an interactive
+            # request might. Was 1800s (30 min); raised after a real production timeout on a slower
+            # machine — see the retry comment above and NUM_CTX's own comment, both from the same
+            # incident. Chunk size was also lowered at the same time (via NUM_CTX), so this is a
+            # backstop for occasional slow calls, not the primary mitigation.
+            with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=3600) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    full_response += chunk.get("response", "")
 
-                if chunk.get("done"):
-                    eval_count = chunk.get("eval_count", tokens_seen)
-                    eval_duration_s = chunk.get("eval_duration", 0) / 1e9
-                    break
+                    if chunk.get("done"):
+                        eval_count = chunk.get("eval_count", tokens_seen)
+                        eval_duration_s = chunk.get("eval_duration", 0) / 1e9
+                        break
 
-                tokens_seen += 1
-                now = time.time()
-                if on_token_progress and (now - last_report_time) >= 1.5:
-                    elapsed = now - start
-                    partial_arrays = _extract_complete_arrays(full_response)
-                    on_token_progress(tokens_seen, tokens_seen / elapsed if elapsed > 0 else 0, partial_arrays)
-                    last_report_time = now
+                    tokens_seen += 1
+                    now = time.time()
+                    if on_token_progress and (now - last_report_time) >= 1.5:
+                        elapsed = now - start
+                        partial_arrays = _extract_complete_arrays(full_response)
+                        on_token_progress(tokens_seen, tokens_seen / elapsed if elapsed > 0 else 0, partial_arrays)
+                        last_report_time = now
+        except requests.exceptions.Timeout:
+            if attempt < max_attempts:
+                applog.log_event(
+                    "chunk_timeout_retry",
+                    f"Chunk timed out on attempt {attempt} of {max_attempts}, retrying once",
+                    level="WARNING",
+                )
+                continue
+            raise
 
         wall_time = time.time() - start
         findings = json.loads(full_response)  # raises JSONDecodeError -> caller marks failed
@@ -1674,6 +1776,30 @@ def _normalize_quote_text(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip())
 
 
+def _resolve_file_ids(findings: dict, file_id_to_filename: dict) -> None:
+    """Converts every finding's model-reported `file_id` (a small integer — see _dated_entry_schema)
+    back into a real `source_file` filename string, using the exact same id->filename map the
+    document headers were built from (see _generate_chronology/the /analyze route). Must run FIRST,
+    before _reconcile_source_files/_resolve_bates/anything else — once this runs, every downstream
+    consumer of `source_file`/`source_files` is completely unchanged from before file_id existed.
+
+    An id the map doesn't recognize (not yet possible to fully prevent at this stage — the enum
+    constraint that makes it structurally impossible is a later addition) resolves to None, the same
+    "honestly unresolvable" value every downstream consumer (_resolve_bates, PDF serving, the Record
+    Sources legend) already knows how to handle gracefully — never guessed/invented.
+    """
+    def to_filename(file_id) -> str | None:
+        return file_id_to_filename.get(file_id) if file_id is not None else None
+
+    for key in _DATED_LIST_FIELDS + ("potential_issues",):
+        for item in findings.get(key, []) or []:
+            item["source_file"] = to_filename(item.pop("file_id", None))
+    for item in findings.get("discrepancies", []) or []:
+        item["source_files"] = [to_filename(fid) for fid in (item.pop("file_ids", None) or [])]
+    for item in findings.get("record_sources", []) or []:
+        item["source_file"] = to_filename(item.pop("file_id", None))
+
+
 def _reconcile_source_files(findings: dict, filename_to_text: dict) -> None:
     """Corrects a finding's source_file when it doesn't match any real ingested document — a real,
     observed failure mode on larger real-world cases (confirmed via user report: a click sometimes
@@ -1692,9 +1818,18 @@ def _reconcile_source_files(findings: dict, filename_to_text: dict) -> None:
     source_file as an honest "can't verify this citation" rather than silently guessing, and this
     function must not undermine that by forcing a match where none is truly warranted. Must run
     BEFORE _resolve_bates/_resolve_record_sources so every later consumer sees the corrected name.
+
+    IMPORTANT: the quote check runs UNCONDITIONALLY, even when `src` already looks like a real,
+    recognized filename — do not reintroduce a `src in filename_to_text: return src` short-circuit
+    ahead of it. Once file_id->filename conversion (_resolve_file_ids) runs first, `source_file` is
+    ALWAYS a real filename by construction (the model can no longer hallucinate an arbitrary
+    string) — a short-circuit on "already a real filename" would then return true for every single
+    finding and silently disable this function's actual remaining job: catching a syntactically
+    valid file_id that the model nonetheless attributed to the WRONG real document. The quote is the
+    only signal that can still catch that case, so it must always get a chance to override `src`.
     """
     def reconcile_one(src: str | None, quote: str | None) -> str | None:
-        if not src or src in filename_to_text:
+        if not src:
             return src
         if quote:
             norm_quote = _normalize_quote_text(quote)
@@ -1705,6 +1840,8 @@ def _reconcile_source_files(findings: dict, filename_to_text: dict) -> None:
                 ]
                 if len(matches) == 1:
                     return matches[0]
+        if src in filename_to_text:
+            return src
         normalized_src = _normalize_filename(src)
         if normalized_src:
             for fname in filename_to_text:
@@ -2053,7 +2190,8 @@ def _merge_chunk_findings(chunk_findings: list) -> dict:
     return merged
 
 
-def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str = "", on_progress=None) -> dict:
+def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str = "", on_progress=None,
+                          file_ids: dict[str, int] | None = None) -> dict:
     """Blocking (non-streaming) version of the /analyze pipeline's extraction + generation logic —
     used by the batch-folder feature, where a background thread processes many patient groups
     unattended and there's no live browser tab to stream progress events to. Raises ValueError if
@@ -2075,16 +2213,24 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
     (with the merge-so-far of every chunk completed up to that point, so the caller can show a
     real, growing chronology while later chunks are still running rather than nothing at all until
     the entire — potentially very long, multi-chunk — analysis finishes).
+
+    `file_ids`, if given (Case Mode only — see db.get_or_assign_file_ids), maps each pdf_path's own
+    filename to a DURABLE per-job integer id that survives across this case's initial run and every
+    later rescan, used as the "### Document N — filename" header's number instead of this call's own
+    positional index. Single-upload mode (never rescanned, one-shot) leaves this None and gets
+    today's simple positional numbering — no cross-call stability needed there.
     """
     records_parts = []
     warnings = []
     ocr_files = []
     source_filenames = []
     filename_to_text = {}  # for _resolve_bates below — the exact per-file text the model actually saw
+    file_id_to_filename = {}  # for _resolve_file_ids — converts the model's file_id back to a real filename
     page_counts = {}  # for the Record Sources legend's "N page(s)" — a hard fact, never model-derived
     total_pages = 0
 
     for i, pdf_path in enumerate(pdf_paths, start=1):
+        doc_id = (file_ids or {}).get(pdf_path.name, i)
         if on_progress:
             on_progress(f"Reading document {i} of {len(pdf_paths)} ({pdf_path.name})…", None)
 
@@ -2120,9 +2266,10 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
             )
             continue
 
-        records_parts.append(f"### Document {i} — {pdf_path.name}\n\n{clean_text}")
+        records_parts.append(f"### Document {doc_id} — {pdf_path.name}\n\n{clean_text}")
         source_filenames.append(pdf_path.name)
         filename_to_text[pdf_path.name] = clean_text
+        file_id_to_filename[doc_id] = pdf_path.name
         page_counts[pdf_path.name] = num_pages
 
     if not records_parts:
@@ -2155,6 +2302,10 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
                 f"Generating chronology ({pass_label}) — {tokens_so_far} tokens so far, "
                 f"{tokens_per_second:.1f} tok/s"
             )
+            # Convert file_id -> source_file on this still-streaming partial parse too, same as the
+            # completed-chunk result below — otherwise a live mid-generation preview would briefly
+            # show raw integer file_ids instead of filenames before the chunk actually finishes.
+            _resolve_file_ids(partial_arrays, file_id_to_filename)
             # Merge whatever earlier chunks already fully finished with whatever fields THIS
             # chunk has already fully written, so a single-chunk case (the common one — a lone
             # small-to-medium patient file) still gets a growing chronology mid-generation instead
@@ -2171,6 +2322,10 @@ def _generate_chronology(pdf_paths: list, detail_level: str, case_context: str =
         result = _call_model_for_chunk(
             chunk_text, detail_level, case_context=case_context, on_token_progress=on_token_progress
         )
+        # Converted here, right as each chunk's OWN result comes back — every later step (the live
+        # progress merge above, the final cross-chunk merge below, _reconcile_source_files/
+        # _resolve_bates) works with real source_file strings only and needs no file_id awareness.
+        _resolve_file_ids(result["findings"], file_id_to_filename)
         chunk_results.append(result["findings"])
         total_eval_count += result["eval_count"]
         total_eval_duration_s += result["eval_duration_s"]
@@ -2459,9 +2614,18 @@ def _run_case_job(job_id: str, folder: Path, folder_display_name: str, detail_le
             session_dir = BATCH_SESSIONS_DIR / session_id
             copied_paths = _copy_files_into_session(session_dir, g["files"])
 
+            # Durable ids assigned BEFORE generation — they have to already be known to build this
+            # call's own "### Document N —" headers. Keyed by filename (not rel_path) to match what
+            # _generate_chronology's read loop looks each file up by, since _copy_files_into_session
+            # preserves the original filename 1:1 (dest.name == src.name, see that function).
+            rel_paths = [str(p.relative_to(folder)) for p in g["files"]]
+            ids_by_rel_path = db.get_or_assign_file_ids(job_id, key, rel_paths)
+            file_ids = {p.name: ids_by_rel_path[rel] for p, rel in zip(g["files"], rel_paths)}
+
             group_context = case_context if key == primary_key else ""
             result = _generate_chronology(
-                copied_paths, detail_level, case_context=group_context, on_progress=on_progress
+                copied_paths, detail_level, case_context=group_context, on_progress=on_progress,
+                file_ids=file_ids,
             )
             manifest["groups"][key].update({
                 "status": "done",
@@ -2654,11 +2818,18 @@ def _run_case_rescan(job_id: str) -> None:
                 else:
                     group_context = ""
 
+                # Durable ids assigned BEFORE generation, same reasoning/keying as _run_case_job —
+                # reuses whatever this job already assigned to earlier files, so a rescan's new
+                # files get ids continuing from the existing max rather than colliding with them.
+                new_rel_paths = [str(p.relative_to(folder)) for p in g["files"]]
+                ids_by_rel_path = db.get_or_assign_file_ids(job_id, key, new_rel_paths)
+                file_ids = {p.name: ids_by_rel_path[rel] for p, rel in zip(g["files"], new_rel_paths)}
+
                 new_result = _generate_chronology(
-                    copied_paths, detail_level, case_context=group_context, on_progress=on_progress
+                    copied_paths, detail_level, case_context=group_context, on_progress=on_progress,
+                    file_ids=file_ids,
                 )
 
-                new_rel_paths = [str(p.relative_to(folder)) for p in g["files"]]
                 if is_new_group:
                     manifest["groups"][key].update({
                         "status": "done", "progress_text": None,
@@ -3223,6 +3394,7 @@ def analyze():
                          # pdf.js to search), so the frontend uses this to show an accurate message
                          # instead of the generic "couldn't locate the quote" one.
         filename_to_text = {}  # for _resolve_bates below — the exact per-file text the model saw
+        file_id_to_filename = {}  # for _resolve_file_ids — converts the model's file_id back to a real filename
         page_counts = {}  # for the Record Sources legend's "N page(s)" — a hard fact, never model-derived
         total_pages = 0
 
@@ -3269,6 +3441,7 @@ def analyze():
 
             records_parts.append(f"### Document {i} — {pdf_path.name}\n\n{clean_text}")
             filename_to_text[pdf_path.name] = clean_text
+            file_id_to_filename[i] = pdf_path.name
             page_counts[pdf_path.name] = num_pages
             yield _event({
                 "stage": "extract", "index": i, "total": total_files,
@@ -3311,7 +3484,9 @@ def analyze():
             "model": MODEL,
             "prompt": prompt,
             "stream": True,
-            "format": RESPONSE_SCHEMA,
+            # Computed from records_text AFTER truncation above — a document truncated off entirely
+            # correctly has no valid id here, since it has no usable content in this call either way.
+            "format": _response_schema_for_ids(_valid_file_ids_in_text(records_text)),
             "options": {"num_ctx": NUM_CTX},
         }
 
@@ -3362,6 +3537,7 @@ def analyze():
             return
 
         _normalize_dates(findings)
+        _resolve_file_ids(findings, file_id_to_filename)
         _reconcile_source_files(findings, filename_to_text)
         _resolve_bates(findings, filename_to_text)
         _dedupe_all_with_multi_source(findings)

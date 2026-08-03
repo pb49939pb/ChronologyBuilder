@@ -2551,3 +2551,53 @@ done, not because anything about the original symptom (a highlighting failure) p
 contamination root cause — worth remembering next time a "worked example" gets added to any prompt:
 prefer an abstract/bracketed template over a fluent concrete narrative, precisely because a fluent
 example is a fabrication risk, not just a style choice.
+
+## Real production failure on the wife's machine: Ollama read-timeout on Case Mode chunks, and a near-miss caught while fixing it (2026-08-03)
+
+Real user report, with a log file: multiple patient groups in a real case failed with
+`requests.exceptions.ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=11434): Read timed out.
+(read timeout=1800)` — one chunk's Ollama call took longer than the hardcoded 30-minute timeout on
+her Windows machine, repeatedly, not a one-off. The failure is caught per-group (`_run_case_job`'s
+broad `except`, by design so one bad group never takes down an unattended overnight run), which
+means the case still shows overall `"done"` even though a specific patient group silently failed —
+worth knowing if this ever needs explaining to a user again. The immediate recoverable workaround
+(files never got recorded as processed since the failure happened before that point) is "Check for
+new files" on the same case, re-selecting the original folder — it correctly detects the failed
+group's files as unprocessed and retries just that group.
+
+Three changes made: (1) `_call_model_for_chunk`'s per-call timeout raised 1800s → 3600s, (2)
+retry-on-timeout added — a `ReadTimeout` now gets one retry before failing the group, the same
+pattern already used for a degenerate (empty-but-valid) response, reasoning that a slow machine
+having a slow moment isn't necessarily stuck, (3) `NUM_CTX` default lowered 12288 → 11264 for
+smaller, faster individual chunks, trading more (smaller) chunks for lower per-call timeout risk.
+
+**A real near-miss caught before shipping, not a hypothetical**: the first attempt lowered `NUM_CTX`
+to 8192, which computed `MAX_INPUT_CHARS` to **-4439** — negative. The prompt template's own
+instructional text has grown to ~26,111 characters across many sessions of adding extraction rules
+(visits, demographics, file_id instructions, record-source consistency checks, etc.) — more than
+double the ~10,626 characters it was when `NUM_CTX=12288` was originally chosen (see the 2026-07-22
+context-window finding earlier in this file). At `NUM_CTX=8192`, the fixed instructional overhead
+ALONE already exceeded the entire context window before a single character of document text — which
+would not have failed loudly, it would have caused silent context overflow (part of the prompt's own
+extraction rules getting truncated), a substantially worse and harder-to-diagnose failure than the
+timeout it was meant to fix. Caught by actually computing `MAX_INPUT_CHARS` after the change rather
+than assuming a smaller `NUM_CTX` is automatically safe — a genuinely important habit given how much
+this file's prompt has grown over time with no corresponding recheck of this budget.
+
+Fixed properly: `NUM_CTX` set to 11264 instead (computed to leave a real, non-thin ~6,300-character/
+~3-page margin against the CURRENT prompt overhead, not assumed), and a hard `RuntimeError` added
+right after `MAX_INPUT_CHARS` is computed, firing at startup if it's ever below a 2000-character
+floor — so a future prompt-overhead increase (this file's instructional text has only ever grown) or
+a careless `LAWFIRMAGENT_NUM_CTX` override fails loudly and immediately instead of silently repeating
+this exact near-miss in production. Verified the guard actually fires by reproducing the exact
+`NUM_CTX=8192` config that triggered this.
+
+**Verified for real**: server starts cleanly with the new default; a real Case Mode run on
+`sample_data/case_006_pdfs` (10 documents) correctly split into 2 chunks, completed with
+`"input_truncated": false`, 33 findings, 0 unresolved source citations, 0 bracket-template
+contamination. Reran `testing/verify_durable_storage.py` (PASS) and the full two-real-case
+`testing/verify_case_highlighting_regression.py` suite — case_ferreira 12/13 and case_whitfield 9/9
+citable findings correctly highlighted; the one non-highlighting finding was ordinary quote-fidelity
+imprecision on a real, correctly-resolved source document (`case_strategy_memo.pdf`), not a
+regression from this fix — same low-rate baseline noise already documented elsewhere in this file,
+unrelated to timeout/chunk-size/retry logic.

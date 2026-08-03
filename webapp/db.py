@@ -129,6 +129,25 @@ def init_db() -> None:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (job_id, group_key, field_key)
                 );
+
+                -- A durable, per-job integer id for every source file, assigned once (lazily, on
+                -- first ever processing) and never reassigned/reused across a case's whole
+                -- lifetime — including every later rescan. This is what lets the model reference a
+                -- document by a small integer (see get_or_assign_file_ids / RESPONSE_SCHEMA's
+                -- file_id field in app.py) instead of having to reproduce a filename string
+                -- byte-for-byte, without that integer colliding between the initial run and a
+                -- rescan's separate _generate_chronology call (each of which only ever sees ITS OWN
+                -- files, so a naive per-call positional counter would restart at 1 every time).
+                CREATE TABLE IF NOT EXISTS case_files (
+                    job_id TEXT NOT NULL REFERENCES cases(job_id) ON DELETE CASCADE,
+                    rel_path TEXT NOT NULL,
+                    file_id INTEGER NOT NULL,
+                    group_key TEXT NOT NULL,
+                    assigned_at REAL NOT NULL,
+                    PRIMARY KEY (job_id, rel_path)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_case_files_job_fileid
+                    ON case_files(job_id, file_id);
                 """
             )
             conn.commit()
@@ -234,6 +253,46 @@ def record_processed_files(job_id: str, group_key: str, rel_paths: list[str]) ->
                 [(job_id, group_key, p, now) for p in rel_paths],
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+# --- Durable per-file ids, for reliable model-facing document references ---------------------
+# See case_files' own comment above (init_db) for why this exists: a small integer is far less
+# error-prone for the model to reproduce than a filename string, and letting it survive across a
+# case's initial run AND every later rescan (rather than resetting per _generate_chronology call)
+# is what makes it usable as a stable, durable reference at all.
+
+def get_or_assign_file_ids(job_id: str, group_key: str, rel_paths: list[str]) -> dict[str, int]:
+    """Returns {rel_path: file_id} for every rel_path given, reusing whatever this job has already
+    assigned and lazily allocating new ids (continuing from this job's own current max) for any
+    rel_path seen for the first time. Must be called BEFORE the group's _generate_chronology call —
+    the id has to already be known to build that call's own document headers. Idempotent: safe to
+    call again after a failed/retried group, since an already-assigned rel_path is never reassigned.
+    """
+    with _write_lock:
+        conn = _connect()
+        try:
+            existing = {
+                r["rel_path"]: r["file_id"]
+                for r in conn.execute("SELECT rel_path, file_id FROM case_files WHERE job_id=?", (job_id,))
+            }
+            next_id = (max(existing.values()) + 1) if existing else 1
+            now = time.time()
+            new_rows = []
+            for p in rel_paths:
+                if p not in existing:
+                    existing[p] = next_id
+                    new_rows.append((job_id, p, next_id, group_key, now))
+                    next_id += 1
+            if new_rows:
+                conn.executemany(
+                    "INSERT INTO case_files (job_id, rel_path, file_id, group_key, assigned_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    new_rows,
+                )
+                conn.commit()
+            return {p: existing[p] for p in rel_paths}
         finally:
             conn.close()
 
